@@ -1,0 +1,50 @@
+version: '3.9'
+
+# Development compose — hot reload, no nginx
+# Usage: docker-compose -f docker-compose.dev.yml up
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-paypal_qbo}
+      POSTGRES_USER:     ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      NODE_ENV:          development
+      PORT:              3001
+      DB_HOST:           db
+      DB_PORT:           5432
+      DB_NAME:           ${DB_NAME:-paypal_qbo}
+      DB_USER:           ${DB_USER:-postgres}
+      DB_PASSWORD:       ${DB_PASSWORD:-postgres}
+      JWT_SECRET:        ${JWT_SECRET:-dev-jwt-secret}
+      ENCRYPTION_KEY:    ${ENCRYPTION_KEY:-dev00000000000000000000000000000000000000000000000000000000000000}
+      QBO_CLIENT_ID:     ${QBO_CLIENT_ID:-}
+      QBO_CLIENT_SECRET: ${QBO_CLIENT_SECRET:-}
+      QBO_REDIRECT_URI:  ${QBO_REDIRECT_URI:-http://localhost:3001/api/quickbooks/callback}
+      QBO_ENVIRONMENT:   ${QBO_ENVIRONMENT:-sandbox}
+      PAYPAL_ENVIRONMENT:${PAYPAL_ENVIRONMENT:-sandbox}
+      FRONTEND_URL:      http://localhost:3000
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend/src:/app/src   # live reload with nodemon
+      - ./backend/logs:/app/logs
+    command: npm run dev
+
+volumes:
+  pgdata_dev:
