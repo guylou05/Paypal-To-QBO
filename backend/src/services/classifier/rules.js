@@ -166,7 +166,22 @@ const RULES = [
       (tx.event_code === 'T1603' && tx.gross_amount < 0),
   },
 
-  // ── 3. PayPal Credit purchase ─────────────────────────────────────────────
+  // ── 3a. PayPal Credit draw (T1601) — suppress as funding detail ──────────
+  // T1601 is generated whenever PayPal Credit funds a purchase. It always
+  // appears alongside a T00xx outbound payment record and represents the
+  // internal credit draw, NOT a separate economic event. Marking it ignored
+  // prevents a duplicate from cluttering the review queue.
+  // (T1602 = credit repayment, T1603 = credit transfer — those are kept.)
+  {
+    priority:    24,
+    category:   'funding_detail',
+    confidence: 'high',
+    qboAccountKey: null,
+    defaultStatus: 'ignored',
+    test: tx => tx.event_code === 'T1601',
+  },
+
+  // ── 3b. PayPal Credit purchase ────────────────────────────────────────────
   {
     priority:    25,
     category:   'paypal_credit_purchase',

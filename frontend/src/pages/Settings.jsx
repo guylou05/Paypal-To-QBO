@@ -414,8 +414,10 @@ export default function Settings() {
 // ── Data Maintenance component ─────────────────────────────────────────────
 
 function DataMaintenance() {
-  const [fixStatus, setFixStatus] = useState(null);  // null | 'running' | { fixed, candidates, message }
-  const [fixError,  setFixError]  = useState('');
+  const [fixStatus,        setFixStatus]        = useState(null);
+  const [fixError,         setFixError]         = useState('');
+  const [reclassifyStatus, setReclassifyStatus] = useState(null);
+  const [reclassifyError,  setReclassifyError]  = useState('');
 
   const handleFixFunding = async () => {
     setFixStatus('running');
@@ -429,52 +431,81 @@ function DataMaintenance() {
     }
   };
 
+  const handleReclassify = async () => {
+    setReclassifyStatus('running');
+    setReclassifyError('');
+    try {
+      const r = await txApi.reclassify();
+      setReclassifyStatus(r.data);
+    } catch (err) {
+      setReclassifyError(err.response?.data?.error || 'Request failed');
+      setReclassifyStatus(null);
+    }
+  };
+
   return (
     <Card icon="🔧" title="Data Maintenance">
       <p className="text-sm text-gray-400 mb-5">
-        One-time fixes for data that was imported before certain features were added.
-        These operations are safe to run multiple times.
+        One-time fixes for data imported before certain features were added.
+        All operations are safe to run multiple times.
       </p>
 
-      {/* Fix split-funding details */}
-      <div className="border border-gray-700/50 rounded-lg p-4">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex-1">
-            <p className="text-sm font-medium text-gray-200 mb-1">
-              Fix Split-Funding Details
-            </p>
-            <p className="text-xs text-gray-500 leading-relaxed">
-              When a PayPal payment is funded by multiple sources (e.g. PayPal Balance
-              + bank transfer), PayPal creates one internal "funding detail" record per
-              source in addition to the main transaction. These internal records are
-              not real transactions and should be hidden from the review queue.
-              Run this once to retroactively mark them as ignored.
-            </p>
-          </div>
-          <button
-            className="btn-secondary text-xs shrink-0"
-            onClick={handleFixFunding}
-            disabled={fixStatus === 'running'}
-          >
-            {fixStatus === 'running' ? '⏳ Running…' : '▶ Run Fix'}
-          </button>
-        </div>
+      <div className="space-y-3">
+        {/* Re-classify all transactions */}
+        <MaintenanceAction
+          title="Re-classify All Transactions"
+          description="Re-runs the classifier on every non-approved, non-synced transaction.
+            Use this after updating classification rules or when new built-in rules are
+            added (e.g. to fix PayPal Credit draw duplicates). Approved and synced
+            transactions are left untouched."
+          buttonLabel="▶ Re-classify"
+          running={reclassifyStatus === 'running'}
+          onClick={handleReclassify}
+          result={reclassifyStatus && reclassifyStatus !== 'running' ? `Re-classified ${reclassifyStatus.count} transaction(s).` : null}
+          error={reclassifyError}
+        />
 
-        {/* Result */}
-        {fixStatus && fixStatus !== 'running' && (
-          <div className={`mt-3 px-3 py-2 rounded-lg border text-xs ${
-            fixStatus.fixed > 0
-              ? 'bg-emerald-900/20 border-emerald-800/40 text-emerald-300'
-              : 'bg-gray-800/60 border-gray-700/50 text-gray-400'
-          }`}>
-            {fixStatus.message}
-          </div>
-        )}
-        {fixError && (
-          <p className="mt-2 text-xs text-rose-400">{fixError}</p>
-        )}
+        {/* Fix split-funding details */}
+        <MaintenanceAction
+          title="Fix Split-Funding Details"
+          description="When a payment is funded by multiple sources (e.g. PayPal Balance +
+            bank transfer), PayPal creates one internal record per source alongside the
+            main transaction. This scan retroactively marks those internal records as
+            ignored so they don't appear in the review queue."
+          buttonLabel="▶ Run Fix"
+          running={fixStatus === 'running'}
+          onClick={handleFixFunding}
+          result={fixStatus && fixStatus !== 'running' ? fixStatus.message : null}
+          error={fixError}
+        />
       </div>
     </Card>
+  );
+}
+
+function MaintenanceAction({ title, description, buttonLabel, running, onClick, result, error }) {
+  return (
+    <div className="border border-gray-700/50 rounded-lg p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1">
+          <p className="text-sm font-medium text-gray-200 mb-1">{title}</p>
+          <p className="text-xs text-gray-500 leading-relaxed">{description}</p>
+        </div>
+        <button
+          className="btn-secondary text-xs shrink-0"
+          onClick={onClick}
+          disabled={running}
+        >
+          {running ? '⏳ Running…' : buttonLabel}
+        </button>
+      </div>
+      {result && (
+        <div className="mt-3 px-3 py-2 rounded-lg border text-xs bg-emerald-900/20 border-emerald-800/40 text-emerald-300">
+          {result}
+        </div>
+      )}
+      {error && <p className="mt-2 text-xs text-rose-400">{error}</p>}
+    </div>
   );
 }
 
