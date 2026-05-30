@@ -56,7 +56,7 @@ export default function Logs() {
   ];
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-4 sm:p-8 space-y-5 sm:space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-white">Logs & Audit Trail</h1>
         <p className="text-gray-500 text-sm mt-1">Every action, sync attempt, and rollback is recorded here</p>

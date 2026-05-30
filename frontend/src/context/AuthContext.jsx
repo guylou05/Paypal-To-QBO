@@ -25,8 +25,16 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  // Call after a profile update that changes the user object (e.g. email change)
+  const refreshUser = async () => {
+    try {
+      const r = await authApi.me();
+      setUser(r.data);
+    } catch {}
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

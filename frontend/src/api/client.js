@@ -28,6 +28,7 @@ export const authApi = {
   me:             ()                => api.get('/auth/me'),
   changePassword: (currentPassword, newPassword) =>
                   api.post('/auth/change-password', { currentPassword, newPassword }),
+  updateProfile:  (email)           => api.patch('/auth/profile', { email }),
 };
 
 // ── PayPal ─────────────────────────────────────────────────────────────────
@@ -35,6 +36,8 @@ export const paypalApi = {
   status:         ()              => api.get('/paypal/status'),
   saveCredentials:(clientId, clientSecret) =>
                   api.post('/paypal/credentials', { clientId, clientSecret }),
+  check:          (startDate, endDate) =>
+                  api.get('/paypal/import/check', { params: { startDate, endDate } }),
   import:         (startDate, endDate) =>
                   api.post('/paypal/import', { startDate, endDate }),
   batches:        ()              => api.get('/paypal/batches'),
@@ -43,16 +46,19 @@ export const paypalApi = {
 
 // ── QuickBooks ─────────────────────────────────────────────────────────────
 export const qboApi = {
-  status:      ()        => api.get('/quickbooks/status'),
-  connect:     ()        => api.get('/quickbooks/connect'),
-  disconnect:  ()        => api.post('/quickbooks/disconnect'),
-  accounts:    ()        => api.get('/quickbooks/accounts'),
-  customers:   ()        => api.get('/quickbooks/customers'),
-  vendors:     ()        => api.get('/quickbooks/vendors'),
-  classes:     ()        => api.get('/quickbooks/classes'),
-  getMappings: ()        => api.get('/quickbooks/mappings'),
-  saveMappings:(mappings)=> api.put('/quickbooks/mappings', { mappings }),
-  bankMatches: (params)  => api.get('/quickbooks/bank-matches', { params }),
+  status:         ()             => api.get('/quickbooks/status'),
+  connect:        ()             => api.get('/quickbooks/connect'),
+  disconnect:     ()             => api.post('/quickbooks/disconnect'),
+  accounts:       ()             => api.get('/quickbooks/accounts'),
+  customers:      ()             => api.get('/quickbooks/customers'),
+  createCustomer: (DisplayName)  => api.post('/quickbooks/customers', { DisplayName }),
+  vendors:        ()             => api.get('/quickbooks/vendors'),
+  createVendor:   (DisplayName)  => api.post('/quickbooks/vendors',   { DisplayName }),
+  classes:        ()             => api.get('/quickbooks/classes'),
+  items:          ()             => api.get('/quickbooks/items'),
+  getMappings:    ()             => api.get('/quickbooks/mappings'),
+  saveMappings:   (mappings)     => api.put('/quickbooks/mappings', { mappings }),
+  bankMatches:    (params)       => api.get('/quickbooks/bank-matches', { params }),
 };
 
 // ── Transactions ───────────────────────────────────────────────────────────
@@ -67,8 +73,13 @@ export const txApi = {
   sync:          (id)        => api.post(`/transactions/${id}/sync`),
   syncBatch:     ()          => api.post('/transactions/sync-batch'),
   rollback:      (id)        => api.post(`/transactions/${id}/rollback`),
-  reclassify:    ()          => api.post('/transactions/reclassify-batch'),
-  recomputeTypes:()          => api.post('/transactions/recompute-types'),
+  reclassify:          ()    => api.post('/transactions/reclassify-batch'),
+  recomputeTypes:      ()    => api.post('/transactions/recompute-types'),
+  fixFundingDetails:   ()    => api.post('/transactions/fix-funding-details'),
+  customerMatch: (params)    => api.get('/transactions/customer-match', { params }),
+  enqueueSyncBatch: (ids)    => api.post('/transactions/sync-queue', { ids }),
+  syncBatchStatus:  (batchId)=> api.get(`/transactions/sync-queue/${batchId}`),
+  cancelSyncBatch:  (batchId)=> api.delete(`/transactions/sync-queue/${batchId}`),
 };
 
 // ── Settings ───────────────────────────────────────────────────────────────
@@ -87,10 +98,11 @@ export const settingsApi = {
 
 // ── Reports ────────────────────────────────────────────────────────────────
 export const reportsApi = {
-  reconciliation: (params) => api.get('/reports/reconciliation', { params }),
-  paypalCredit:   (params) => api.get('/reports/paypal-credit',  { params }),
-  fees:           (params) => api.get('/reports/fees',           { params }),
-  transfers:      (params) => api.get('/reports/transfers',      { params }),
+  reconciliation: (params) => api.get('/reports/reconciliation',        { params }),
+  detail:         (params) => api.get('/reports/reconciliation-detail', { params }),
+  paypalCredit:   (params) => api.get('/reports/paypal-credit',         { params }),
+  fees:           (params) => api.get('/reports/fees',                  { params }),
+  transfers:      (params) => api.get('/reports/transfers',             { params }),
   exceptions:     ()       => api.get('/reports/exceptions'),
 };
 

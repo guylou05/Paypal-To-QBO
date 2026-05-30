@@ -8,6 +8,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { handleValidation } = require('../middleware/validate');
 const { syncTransaction, rollbackTransaction } = require('../services/quickbooks/syncer');
 const { classifyBatch } = require('../services/classifier');
+const { markFundingDetails } = require('../services/paypal/importer');
 const logger   = require('../utils/logger');
 
 const router = express.Router();
@@ -17,6 +18,7 @@ const VALID_STATUSES = ['imported', 'classified', 'needs_review', 'approved', 's
 const VALID_CATEGORIES = [
   'sale', 'paypal_fee', 'paypal_credit_purchase', 'paypal_credit_repayment',
   'bank_transfer_in', 'bank_transfer_out', 'refund', 'noise', 'unknown',
+  'funding_detail',  // internal split-funding sub-transactions; auto-set by importer
 ];
 const VALID_TRANSACTION_TYPES = [
   'Payment', 'Invoice', 'Transfer', 'Refund', 'Purchase', 'Bank Payout', 'Other',
@@ -101,6 +103,31 @@ router.get('/',
   }
 );
 
+// GET /api/transactions/customer-match — look up stored payer → QBO customer mapping
+// Used by EditModal to auto-populate the customer field from previous reviewer choices.
+router.get('/customer-match',
+  query('payer_email').optional().isString(),
+  query('payer_name').optional().isString(),
+  handleValidation,
+  async (req, res) => {
+    const email = (req.query.payer_email || '').trim().toLowerCase();
+    const name  = (req.query.payer_name  || '').trim().toLowerCase();
+
+    let match = null;
+
+    // Email key takes precedence (more unique identifier)
+    if (email) {
+      match = await db('payer_customer_matches').where({ match_key: email }).first();
+    }
+    // Fall back to name key
+    if (!match && name) {
+      match = await db('payer_customer_matches').where({ match_key: name }).first();
+    }
+
+    return res.json({ match: match || null });
+  }
+);
+
 // GET /api/transactions/summary — counts by status and category
 router.get('/summary', async (req, res) => {
   const byCat = await db('normalized_transactions')
@@ -178,6 +205,51 @@ router.patch('/:id',
     updates.updated_at  = new Date();
 
     await db('normalized_transactions').where({ id: tx.id }).update(updates);
+
+    // ── Customer auto-match memory ────────────────────────────────────────────
+    // When the reviewer explicitly assigns a QBO customer, remember the mapping
+    // payer_email (or payer_name as fallback) → customer_id so future transactions
+    // from the same payer can be auto-populated without re-reviewing.
+    const savedMeta  = updates.qbo_metadata;
+    const custId     = savedMeta?.customer_id;
+    const custName   = savedMeta?.customer_name;
+
+    if (custId) {
+      const email  = (tx.payer_email || '').trim().toLowerCase();
+      const name   = (tx.payer_name  || '').trim().toLowerCase();
+      const key    = email || name;
+      const mtype  = email ? 'email' : 'name';
+
+      if (key) {
+        try {
+          const existing = await db('payer_customer_matches').where({ match_key: key }).first();
+          if (existing) {
+            await db('payer_customer_matches').where({ match_key: key }).update({
+              qbo_customer_id:   custId,
+              qbo_customer_name: custName || existing.qbo_customer_name,
+              match_count:       existing.match_count + 1,
+              last_matched_at:   new Date(),
+              updated_at:        new Date(),
+            });
+          } else {
+            await db('payer_customer_matches').insert({
+              match_key:         key,
+              match_type:        mtype,
+              qbo_customer_id:   custId,
+              qbo_customer_name: custName || '',
+              match_count:       1,
+              last_matched_at:   new Date(),
+              created_at:        new Date(),
+              updated_at:        new Date(),
+            });
+          }
+        } catch (err) {
+          // Non-fatal — don't block the save if the memory upsert fails
+          logger.warn('Failed to upsert payer_customer_matches', { error: err.message });
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     await db('audit_logs').insert({
       user_id:     req.user.id,
@@ -299,6 +371,107 @@ router.post('/bulk-ignore',
     return res.json({ updated });
   }
 );
+
+// ── Server-side sync queue ─────────────────────────────────────────────────
+
+// POST /api/transactions/sync-queue — create a server-side sync batch
+// Body: { ids: [txId, ...] }   — the transaction IDs to enqueue.
+// Returns: { batchId, total }
+router.post('/sync-queue',
+  body('ids').isArray({ min: 1 }),
+  handleValidation,
+  async (req, res) => {
+    const { ids } = req.body;
+
+    // Resolve only approved transactions — skip any that are already synced/invalid
+    const txs = await db('normalized_transactions')
+      .whereIn('id', ids)
+      .where('status', 'approved')
+      .select('id', 'paypal_transaction_id');
+
+    if (txs.length === 0) {
+      return res.status(422).json({ error: 'No approved transactions found for the given IDs.' });
+    }
+
+    // Create the batch record
+    const batchRows = await db('sync_batches').insert({
+      status:         'running',
+      total_jobs:     txs.length,
+      completed_jobs: 0,
+      failed_jobs:    0,
+      created_by:     req.user.id,
+      created_at:     new Date(),
+      updated_at:     new Date(),
+    }).returning('id');
+    const batchId = batchRows[0].id;
+
+    // Enqueue one job per transaction
+    const jobs = txs.map(tx => ({
+      batch_id:              batchId,
+      transaction_id:        tx.id,
+      paypal_transaction_id: tx.paypal_transaction_id,
+      status:                'pending',
+      attempts:              0,
+      max_attempts:          3,
+      created_by:            req.user.id,
+      created_at:            new Date(),
+      updated_at:            new Date(),
+    }));
+    await db('sync_jobs').insert(jobs);
+
+    logger.info(`Sync queue batch #${batchId} created with ${txs.length} jobs`);
+    return res.json({ batchId, total: txs.length, queued: txs.length });
+  }
+);
+
+// GET /api/transactions/sync-queue/:batchId — poll batch + per-job status
+router.get('/sync-queue/:batchId', async (req, res) => {
+  const batchId = parseInt(req.params.batchId, 10);
+  const batch   = await db('sync_batches').where({ id: batchId }).first();
+  if (!batch) return res.status(404).json({ error: 'Sync batch not found' });
+
+  const jobs = await db('sync_jobs')
+    .where({ batch_id: batchId })
+    .select('id', 'transaction_id', 'paypal_transaction_id', 'status', 'attempts', 'max_attempts', 'error_message', 'result_payload', 'started_at', 'completed_at')
+    .orderBy('id', 'asc');
+
+  return res.json({ batch, jobs });
+});
+
+// DELETE /api/transactions/sync-queue/:batchId — cancel all pending jobs in a batch
+router.delete('/sync-queue/:batchId', async (req, res) => {
+  const batchId = parseInt(req.params.batchId, 10);
+  const batch   = await db('sync_batches').where({ id: batchId }).first();
+  if (!batch) return res.status(404).json({ error: 'Sync batch not found' });
+
+  await db('sync_jobs')
+    .where({ batch_id: batchId, status: 'pending' })
+    .update({ status: 'cancelled', updated_at: new Date() });
+
+  // Check if anything is still running; if not, mark batch cancelled/partial
+  const remaining = await db('sync_jobs')
+    .where({ batch_id: batchId })
+    .whereIn('status', ['pending', 'running'])
+    .count('id as cnt')
+    .first();
+
+  if (parseInt(remaining.cnt, 10) === 0) {
+    const stats = await db('sync_jobs').where({ batch_id: batchId })
+      .select(
+        db.raw("sum(case when status='completed' then 1 else 0 end) as completed"),
+        db.raw("sum(case when status='failed'    then 1 else 0 end) as failed"),
+      ).first();
+    await db('sync_batches').where({ id: batchId }).update({
+      status:         'cancelled',
+      completed_jobs: parseInt(stats.completed, 10) || 0,
+      failed_jobs:    parseInt(stats.failed,    10) || 0,
+      completed_at:   new Date(),
+      updated_at:     new Date(),
+    });
+  }
+
+  return res.json({ cancelled: true });
+});
 
 // POST /api/transactions/:id/sync — sync a single approved transaction to QBO
 router.post('/:id/sync', async (req, res) => {
@@ -426,7 +599,75 @@ router.post('/reclassify-batch', async (req, res) => {
     .update({ status: 'imported', category: null, confidence: null, updated_at: new Date() });
 
   await classifyBatch(ids);
+
+  // Re-detect funding-detail sub-transactions.
+  // Use requireParentInBatch=false so the check spans the whole DB — the parent
+  // may already be approved/synced and therefore not in `ids`.
+  await markFundingDetails(ids, { requireParentInBatch: false });
+
   return res.json({ message: `Reclassified ${ids.length} transactions`, count: ids.length });
+});
+
+// POST /api/transactions/fix-funding-details
+// Retroactively detects split-funding detail records that were imported before
+// this feature was added, and marks them ignored.  Safe to run multiple times.
+router.post('/fix-funding-details', async (req, res) => {
+  try {
+    // Candidates: not yet ignored, not synced, and linked to another transaction
+    const candidates = await db('normalized_transactions')
+      .whereNotNull('related_paypal_transaction_id')
+      .whereNotIn('status', ['ignored', 'synced'])
+      .select('id', 'related_paypal_transaction_id', 'category', 'gross_amount', 'transaction_date');
+
+    if (!candidates.length) return res.json({ fixed: 0, message: 'No candidates found.' });
+
+    const relatedIds = [...new Set(candidates.map(t => t.related_paypal_transaction_id))];
+    const parents    = await db('normalized_transactions')
+      .whereIn('paypal_transaction_id', relatedIds)
+      .select('paypal_transaction_id', 'category', 'gross_amount', 'transaction_date');
+
+    const parentMap  = new Map(parents.map(p => [p.paypal_transaction_id, p]));
+
+    const SALE_LIKE  = new Set([
+      'sale', 'subscription', 'donation_received', 'purchase',
+      'paypal_credit_purchase',
+    ]);
+
+    const toIgnore = [];
+    for (const tx of candidates) {
+      const parent = parentMap.get(tx.related_paypal_transaction_id);
+      if (!parent) continue;
+
+      // Must be: parent is a sale-like, this record is a debit, AND they share the
+      // same calendar date (guards against confusing same-day refunds — edge case,
+      // but a safer heuristic than date-less matching).
+      const sameDayOrClose = (() => {
+        if (!tx.transaction_date || !parent.transaction_date) return true; // no date → allow
+        const diff = Math.abs(new Date(tx.transaction_date) - new Date(parent.transaction_date));
+        return diff <= 24 * 60 * 60 * 1000; // ≤ 1 day apart
+      })();
+
+      if (SALE_LIKE.has(parent.category) && parseFloat(tx.gross_amount) < 0 && sameDayOrClose) {
+        toIgnore.push(tx.id);
+      }
+    }
+
+    if (toIgnore.length) {
+      await db('normalized_transactions')
+        .whereIn('id', toIgnore)
+        .update({ category: 'funding_detail', status: 'ignored', confidence: 'high', updated_at: new Date() });
+    }
+
+    logger.info(`fix-funding-details: marked ${toIgnore.length} of ${candidates.length} candidates`);
+    return res.json({
+      fixed:      toIgnore.length,
+      candidates: candidates.length,
+      message:    `Marked ${toIgnore.length} transaction(s) as funding_detail / ignored.`,
+    });
+  } catch (err) {
+    logger.error('fix-funding-details error', { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;

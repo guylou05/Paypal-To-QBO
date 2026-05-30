@@ -186,6 +186,21 @@ async function queryClasses() {
   return (resp.QueryResponse && resp.QueryResponse.Class) || [];
 }
 
+/**
+ * Fetch active Service and Non-Inventory items from QBO.
+ * These are used as line-item references on SalesReceipts and RefundReceipts.
+ */
+async function queryItems() {
+  // QBO IDS query language does not support parenthesised OR expressions.
+  // Fetch all active items and filter by type in JS instead.
+  const resp = await apiCall('GET', '/query', {
+    query: "SELECT * FROM Item WHERE Active = true MAXRESULTS 1000",
+    minorversion: 65,
+  });
+  const all = (resp.QueryResponse && resp.QueryResponse.Item) || [];
+  return all.filter(i => i.Type === 'Service' || i.Type === 'NonInventory');
+}
+
 // ── Bank transaction queries (for transfer matching) ──────────────────────
 
 /**
@@ -257,6 +272,27 @@ async function createSalesReceipt(payload) {
   return resp.SalesReceipt;
 }
 
+/**
+ * Create a new QBO Vendor.
+ * At minimum, payload must include { DisplayName }.
+ * Optional: CompanyName, PrintOnCheckName, Email, Phone, etc.
+ * Returns the created Vendor object (with Id and SyncToken).
+ */
+async function createVendor(payload) {
+  const resp = await apiCall('POST', '/vendor?minorversion=65', payload);
+  return resp.Vendor;
+}
+
+/**
+ * Create a new QBO Customer.
+ * At minimum, payload must include { DisplayName }.
+ * Returns the created Customer object (with Id and SyncToken).
+ */
+async function createCustomer(payload) {
+  const resp = await apiCall('POST', '/customer?minorversion=65', payload);
+  return resp.Customer;
+}
+
 // ── Fetch + update existing objects ───────────────────────────────────────
 
 /**
@@ -319,6 +355,7 @@ module.exports = {
   queryCustomers,
   queryVendors,
   queryClasses,
+  queryItems,
   getCompanyInfo,
   createJournalEntry,
   createTransfer,
@@ -329,4 +366,6 @@ module.exports = {
   sparseUpdateNote,
   deleteObject,
   isConnected,
+  createVendor,
+  createCustomer,
 };

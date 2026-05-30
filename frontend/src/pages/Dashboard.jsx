@@ -14,7 +14,7 @@ function StatCard({ label, value, sub, color = 'blue' }) {
   return (
     <div className={`card border-l-4 ${colors[color]}`}>
       <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</p>
-      <p className="text-3xl font-bold text-white">{value}</p>
+      <p className="text-2xl sm:text-3xl font-bold text-white">{value}</p>
       {sub && <p className="text-xs text-gray-500 mt-1">{sub}</p>}
     </div>
   );
@@ -48,21 +48,21 @@ export default function Dashboard() {
   };
 
   if (loading) return (
-    <div className="p-8 flex items-center gap-3 text-gray-500">
+    <div className="p-4 sm:p-8 flex items-center gap-3 text-gray-500">
       <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500" />
       Loading dashboard…
     </div>
   );
 
   return (
-    <div className="p-8 space-y-8">
+    <div className="p-4 sm:p-8 space-y-5 sm:space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-white">Dashboard</h1>
         <p className="text-gray-500 text-sm mt-1">PayPal → QuickBooks reconciliation overview</p>
       </div>
 
       {/* Connection status */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className={`card flex items-center gap-3 ${ppStatus?.connected ? 'border-green-800' : 'border-red-800'}`}>
           <div className={`w-3 h-3 rounded-full ${ppStatus?.connected ? 'bg-green-400' : 'bg-red-400'}`} />
           <div>
@@ -73,31 +73,62 @@ export default function Dashboard() {
             <Link to="/setup" className="ml-auto btn-primary text-xs px-3 py-1">Setup</Link>
           )}
         </div>
-        <div className={`card flex items-center gap-3 ${qboStatus?.connected ? 'border-green-800' : 'border-red-800'}`}>
-          <div className={`w-3 h-3 rounded-full ${qboStatus?.connected ? 'bg-green-400' : 'bg-red-400'}`} />
-          <div>
-            <p className="text-sm font-medium">QuickBooks Online</p>
-            <p className="text-xs text-gray-500">
-              {qboStatus?.connected
-                ? (qboStatus.company?.CompanyName || 'Connected')
-                : 'Not connected — configure in Setup'}
-            </p>
-          </div>
-          {!qboStatus?.connected && (
-            <Link to="/setup" className="ml-auto btn-primary text-xs px-3 py-1">Setup</Link>
-          )}
-        </div>
+        {(() => {
+          const te       = qboStatus?.tokenExpiry;
+          const expired  = te && te.days_remaining < 0;
+          const critical = te && te.days_remaining <= 3 && !expired;
+          const warning  = te && te.days_remaining <= 14 && !expired && !critical;
+          const borderCls = !qboStatus?.connected ? 'border-red-800'
+                          : expired               ? 'border-red-800'
+                          : critical              ? 'border-orange-700'
+                          : warning               ? 'border-amber-700'
+                          :                         'border-green-800';
+          const dotCls    = !qboStatus?.connected ? 'bg-red-400'
+                          : expired               ? 'bg-red-400'
+                          : critical || warning   ? 'bg-amber-400'
+                          :                         'bg-green-400';
+          return (
+            <div className={`card flex items-center gap-3 ${borderCls}`}>
+              <div className={`w-3 h-3 rounded-full shrink-0 ${dotCls}`} />
+              <div className="min-w-0">
+                <p className="text-sm font-medium">QuickBooks Online</p>
+                <p className="text-xs text-gray-500">
+                  {qboStatus?.connected
+                    ? (qboStatus.company?.CompanyName || 'Connected')
+                    : 'Not connected — configure in Setup'}
+                </p>
+                {qboStatus?.connected && te && (
+                  <p className={`text-xs mt-0.5 ${
+                    expired  ? 'text-red-400' :
+                    critical ? 'text-orange-400' :
+                    warning  ? 'text-amber-400' :
+                               'text-gray-600'
+                  }`}>
+                    {expired
+                      ? 'OAuth token expired — reconnect required'
+                      : `OAuth token expires in ${te.days_remaining} day${te.days_remaining === 1 ? '' : 's'}`}
+                  </p>
+                )}
+              </div>
+              {(!qboStatus?.connected || expired || critical) && (
+                <Link to="/setup" className="ml-auto btn-primary text-xs px-3 py-1 shrink-0">
+                  {expired ? 'Reconnect' : 'Setup'}
+                </Link>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <StatCard label="Needs Review"  value={getCount('needs_review')} color="yellow" />
         <StatCard label="Approved"      value={getCount('approved')}     color="purple" />
         <StatCard label="Synced to QBO" value={getCount('synced')}       color="green"  />
         <StatCard label="Failed"        value={getCount('failed')}        color="red"    />
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
         <StatCard label="Imported"   value={getCount('imported')}   color="blue" />
         <StatCard label="Classified" value={getCount('classified')} color="blue" />
         <StatCard label="Ignored"    value={getCount('ignored')}    color="blue" />

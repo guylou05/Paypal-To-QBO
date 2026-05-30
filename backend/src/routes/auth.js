@@ -83,14 +83,75 @@ router.post('/change-password',
   body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   handleValidation,
   async (req, res) => {
-    const user = await db('users').where({ id: req.user.id }).first();
-    const ok   = await bcrypt.compare(req.body.currentPassword, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Current password incorrect' });
+    try {
+      const user = await db('users').where({ id: req.user.id }).first();
+      const ok   = await bcrypt.compare(req.body.currentPassword, user.password_hash);
+      if (!ok) return res.status(422).json({ error: 'Current password is incorrect' });
 
-    const hash = await bcrypt.hash(req.body.newPassword, 12);
-    await db('users').where({ id: user.id }).update({ password_hash: hash, updated_at: new Date() });
-    res.clearCookie('auth_token');
-    return res.json({ message: 'Password changed. Please log in again.' });
+      const hash = await bcrypt.hash(req.body.newPassword, 12);
+      await db('users').where({ id: user.id }).update({ password_hash: hash, updated_at: new Date() });
+
+      await db('audit_logs').insert({
+        user_id:     user.id,
+        action:      'password_changed',
+        entity_type: 'user',
+        entity_id:   String(user.id),
+        ip_address:  req.ip,
+        created_at:  new Date(),
+        updated_at:  new Date(),
+      });
+
+      res.clearCookie('auth_token');
+      return res.json({ message: 'Password changed. Please log in again.' });
+    } catch (err) {
+      logger.error('Change password error', { error: err.message });
+      return res.status(500).json({ error: 'Failed to change password' });
+    }
+  }
+);
+
+// PATCH /api/auth/profile — update own email
+router.patch('/profile',
+  authenticate,
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  handleValidation,
+  async (req, res) => {
+    try {
+      const newEmail = req.body.email;
+
+      // Guard: email already used by another account
+      const conflict = await db('users')
+        .where({ email: newEmail })
+        .whereNot({ id: req.user.id })
+        .first();
+      if (conflict) return res.status(409).json({ error: 'Email is already in use by another account' });
+
+      await db('users').where({ id: req.user.id }).update({ email: newEmail, updated_at: new Date() });
+
+      await db('audit_logs').insert({
+        user_id:     req.user.id,
+        action:      'email_changed',
+        entity_type: 'user',
+        entity_id:   String(req.user.id),
+        details:     `Changed to ${newEmail}`,
+        ip_address:  req.ip,
+        created_at:  new Date(),
+        updated_at:  new Date(),
+      });
+
+      // Re-issue JWT with updated email
+      const updated = await db('users').where({ id: req.user.id }).first();
+      const token   = jwt.sign(
+        { id: updated.id, email: updated.email, role: updated.role },
+        config.jwt.secret,
+        { expiresIn: config.jwt.expiresIn }
+      );
+      res.cookie('auth_token', token, COOKIE_OPTS);
+      return res.json({ user: { id: updated.id, email: updated.email, role: updated.role } });
+    } catch (err) {
+      logger.error('Profile update error', { error: err.message });
+      return res.status(500).json({ error: 'Failed to update profile' });
+    }
   }
 );
 

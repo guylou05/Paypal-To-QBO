@@ -55,14 +55,36 @@ router.use(authenticate, requireAdmin);
 
 // GET /api/quickbooks/status
 router.get('/status', async (req, res) => {
-  const connected = await qboClient.isConnected();
-  if (!connected) return res.json({ connected: false });
+  const config      = require('../config');
+  const environment = config.qbo.environment || 'production';
+  const connected   = await qboClient.isConnected();
+
+  // Read token expiry from DB regardless of connection state
+  let tokenExpiry = null;
+  try {
+    const tokenRow = await db('oauth_tokens')
+      .where({ provider: 'quickbooks' })
+      .orderBy('updated_at', 'desc')
+      .select('refresh_token_expires_at')
+      .first();
+    if (tokenRow && tokenRow.refresh_token_expires_at) {
+      const expiresAt = new Date(tokenRow.refresh_token_expires_at);
+      const now       = new Date();
+      const msLeft    = expiresAt - now;
+      tokenExpiry = {
+        expires_at:    expiresAt.toISOString(),
+        days_remaining: Math.floor(msLeft / (1000 * 60 * 60 * 24)),
+      };
+    }
+  } catch (_) { /* non-fatal */ }
+
+  if (!connected) return res.json({ connected: false, environment, tokenExpiry });
 
   try {
     const info = await qboClient.getCompanyInfo();
-    return res.json({ connected: true, company: info });
+    return res.json({ connected: true, company: info, environment, tokenExpiry });
   } catch (err) {
-    return res.json({ connected: true, error: err.message });
+    return res.json({ connected: true, error: err.message, environment, tokenExpiry });
   }
 });
 
@@ -97,11 +119,72 @@ router.get('/vendors', async (req, res) => {
   }
 });
 
+// POST /api/quickbooks/vendors — create a new QBO Vendor on the fly
+// Used by EditModal when the reviewer types a vendor name that doesn't exist yet.
+router.post('/vendors',
+  require('express-validator').body('DisplayName').notEmpty().withMessage('DisplayName is required'),
+  require('../middleware/validate').handleValidation,
+  async (req, res) => {
+    try {
+      const vendor = await qboClient.createVendor({ DisplayName: req.body.DisplayName.trim() });
+      logger.info('QBO vendor created', { id: vendor.Id, name: vendor.DisplayName });
+      await db('audit_logs').insert({
+        user_id:    req.user.id,
+        action:     'qbo_create',
+        entity_type:'vendor',
+        entity_id:  vendor.Id,
+        details:    `Created QBO Vendor: ${vendor.DisplayName}`,
+        created_at: new Date(), updated_at: new Date(),
+      });
+      return res.json(vendor);
+    } catch (err) {
+      logger.error('QBO vendor create failed', { error: err.message });
+      return res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+// POST /api/quickbooks/customers — create a new QBO Customer on the fly
+router.post('/customers',
+  require('express-validator').body('DisplayName').notEmpty().withMessage('DisplayName is required'),
+  require('../middleware/validate').handleValidation,
+  async (req, res) => {
+    try {
+      const customer = await qboClient.createCustomer({ DisplayName: req.body.DisplayName.trim() });
+      logger.info('QBO customer created', { id: customer.Id, name: customer.DisplayName });
+      await db('audit_logs').insert({
+        user_id:    req.user.id,
+        action:     'qbo_create',
+        entity_type:'customer',
+        entity_id:  customer.Id,
+        details:    `Created QBO Customer: ${customer.DisplayName}`,
+        created_at: new Date(), updated_at: new Date(),
+      });
+      return res.json(customer);
+    } catch (err) {
+      logger.error('QBO customer create failed', { error: err.message });
+      return res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 // GET /api/quickbooks/classes
 router.get('/classes', async (req, res) => {
   try {
     const classes = await qboClient.queryClasses();
     return res.json(classes);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/quickbooks/items
+// Returns active Service/Non-Inventory items — used as line-item refs on
+// SalesReceipts and RefundReceipts (required by QBO API for those object types).
+router.get('/items', async (req, res) => {
+  try {
+    const items = await qboClient.queryItems();
+    return res.json(items);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

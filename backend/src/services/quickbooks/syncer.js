@@ -1,80 +1,71 @@
 /**
  * QuickBooks Online transaction syncer.
  *
- * All transaction types are posted as Journal Entries (most universal —
- * works regardless of the customer's QBO Items / A/R / A/P setup).
- * When the reviewer has matched a customer or vendor via qbo_metadata,
- * we attach an Entity reference on the relevant JE line so the entry
- * appears in their activity center and sub-ledger.
+ * Accounting object priority (mimics professional bookkeeper workflow):
  *
- * Accounting logic:
+ *  1. SalesReceipt   — customer revenue (sale, subscription, donation).
+ *  2. Purchase       — expense payments, fees, PayPal Credit buys.
+ *  3. Transfer       — bank ↔ PayPal movements and Credit repayments.
+ *  4. RefundReceipt  — refunds / chargebacks issued to customers.
+ *  5. JournalEntry   — FALLBACK ONLY: adjustments, FX conversions, or
+ *                       when SalesReceipt can't be built (Sales Item /
+ *                       Customer not yet configured in Setup).
  *
- *  sale / Payment / Invoice (income):
- *    Dr  PayPal Bank                    (net_amount)
- *    Dr  PayPal Fees                    (fee_amount)   [if fee > 0]
- *    Cr  Income Account                 (gross_amount) {EntityRef: Customer}
- *        ↳ Income Account = override or qbo_metadata.income_account_id or paypal_sales mapping
+ * ── Object mapping by category ────────────────────────────────────────────
  *
- *  paypal_fee (standalone processing fee):
- *    Dr  Expense Account / PayPal Fees  (|gross|)      {EntityRef: Vendor if set}
- *    Cr  PayPal Bank                    (|gross|)
+ *  sale / subscription / donation_received:
+ *    SalesReceipt — Customer, gross amount, DepositToAccountRef = PayPal Bank
+ *    + Purchase   — PayPal processing fee, paid from PayPal Bank
+ *    → Returned as { type: 'SaleWithFee' } when fee > 0.
+ *    [Falls back to JournalEntry when paypal_sales_item or default customer
+ *     is not configured in Setup → Account Mapping]
  *
- *  paypal_credit_purchase (Purchase / expense via PayPal Credit):
- *    Dr  Expense Account                (|gross|)      {EntityRef: Vendor if set}
- *    Cr  PayPal Credit (liability)      (|gross|)
+ *  paypal_fee / international_fee:
+ *    Purchase — paid from PayPal Bank → PayPal Fees expense account.
+ *
+ *  purchase / payout:
+ *    Purchase — paid from PayPal Bank → chosen expense / uncategorized account.
+ *
+ *  paypal_credit_purchase:
+ *    Purchase — MUST be paid from PayPal Credit (liability), NEVER PayPal Bank.
+ *    Increases the credit card liability correctly.
  *
  *  paypal_credit_repayment:
- *    Dr  PayPal Credit (liability)      (|gross|)
- *    Cr  PayPal Bank                    (|gross|)
+ *    Transfer — PayPal Bank → PayPal Credit. Reduces liability, no P&L impact.
  *
- *  bank_transfer_in:
- *    QBO Transfer: bank_account_1 → paypal_bank
+ *  bank_transfer_in / bank_transfer_out:
+ *    Transfer — between bank account and PayPal Bank.
+ *    BankMatchLink — if reviewer approved an existing QBO bank transaction.
  *
- *  bank_transfer_out (includes Bank Payout):
- *    QBO Transfer: paypal_bank → bank_account_1
+ *  refund / chargeback (issued, gross < 0):
+ *    RefundReceipt — Customer, amount, DepositToAccountRef = PayPal Bank.
+ *    [Falls back to JournalEntry when Sales Item / Customer not configured]
  *
- *  subscription / donation_received:
- *    Same JE as sale — user can pick a different income account.
+ *  refund / chargeback (received / won, gross > 0):
+ *    JournalEntry — Dr PayPal Bank / Cr Expense (vendor credit / chargeback win).
  *
- *  international_fee:
- *    Same JE as paypal_fee — user can pick a different expense account.
+ *  adjustment / currency_conversion:
+ *    JournalEntry — no cleaner native QBO object exists.
  *
- *  payout (mass payment / Payouts API):
- *    Dr  Expense Account / Uncategorized (|gross|)    {EntityRef: Vendor if set}
- *    Cr  PayPal Bank                     (|gross|)
+ * ── Compound objects ────────────────────────────────────────────────────────
  *
- *  refund / chargeback (issued TO customer — gross < 0):
- *    Dr  Income Account                 (|gross|)      {EntityRef: Customer if set}
- *    Cr  PayPal Fees                    (|fee|)        [if fee returned]
- *    Cr  PayPal Bank                    (|net|)
+ *  SaleWithFee  { type, primary: SalesReceipt, fee: Purchase }
+ *    Syncer creates both. fee_qbo_id + fee_qbo_type stored in qbo_metadata
+ *    so rollback can delete both objects.
  *
- *  refund / chargeback (received / won — gross > 0):
- *    Dr  PayPal Bank                    (|gross|)
- *    Cr  Expense Account                (|gross|)      {EntityRef: Vendor if set}
+ *  SplitSale (legacy) { type, primary: JournalEntry, fee: JournalEntry }
+ *    Preserved for backward-compat rollback of already-synced records.
+ *    New syncs never produce SplitSale — they use SaleWithFee or the
+ *    standard JE fallback.
  *
- *  adjustment (credit, gross > 0):
- *    Dr  PayPal Bank                    (|gross|)
- *    Cr  Income Account / Uncategorized (|gross|)
- *
- *  adjustment (debit, gross < 0):
- *    Dr  Expense Account / Uncategorized (|gross|)
- *    Cr  PayPal Bank                     (|gross|)
- *
- *  currency_conversion (gain, gross > 0):
- *    Dr  PayPal Bank                    (|gross|)
- *    Cr  Income Account / Uncategorized (|gross|)
- *
- *  currency_conversion (loss, gross < 0):
- *    Dr  Expense Account / Uncategorized (|gross|)
- *    Cr  PayPal Bank                     (|gross|)
- *
- * ClassRef is added to every matching line when qbo_metadata.class_id is set.
+ * ── ClassRef ────────────────────────────────────────────────────────────────
+ *   Added to SalesReceipt and Purchase lines when qbo_metadata.class_id set.
  */
 const db     = require('../../db/knex');
 const qbo    = require('./client');
 const logger = require('../../utils/logger');
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Meta helpers ───────────────────────────────────────────────────────────
 
 /** Safe-parse qbo_metadata whether it's a string or already an object. */
 function parseMeta(tx) {
@@ -95,11 +86,7 @@ async function getAccountId(mappingKey, tx) {
   return { id: row.qbo_account_id, name: row.qbo_account_name };
 }
 
-/**
- * Resolve the PayPal clearing (bank/asset) account for a transaction.
- * Prefers qbo_metadata.paypal_account_id set by the reviewer in the UI;
- * falls back to the mapped 'paypal_bank' account from account_mappings.
- */
+/** PayPal clearing/bank account — reviewer override or mapped paypal_bank. */
 async function getPaypalAccount(meta, tx) {
   if (meta.paypal_account_id) {
     return { id: meta.paypal_account_id, name: meta.paypal_account_name || 'PayPal' };
@@ -107,26 +94,65 @@ async function getPaypalAccount(meta, tx) {
   return getAccountId('paypal_bank', tx);
 }
 
-/**
- * Resolve the destination bank account for a transfer.
- * Prefers qbo_metadata.bank_account_id set by the reviewer;
- * falls back to mapped 'bank_account_1'.
- */
+/** Destination bank account for transfers — reviewer override or bank_account_1. */
 async function getBankAccount(meta, tx) {
   if (meta.bank_account_id) {
     return { id: meta.bank_account_id, name: meta.bank_account_name || 'Bank' };
   }
-  const key = tx.override_qbo_account_key || 'bank_account_1';
-  return getAccountId(key, tx);
+  return getAccountId(tx.override_qbo_account_key || 'bank_account_1', tx);
 }
 
 /**
- * Build a single JournalEntry line.
- *
- * options:
- *   entity   — { Type: 'Customer'|'Vendor', EntityRef: { value, name } }
- *   classRef — { value, name }
+ * Resolve the QBO Service/Non-Inventory Item used as the line item on
+ * SalesReceipts and RefundReceipts.  Configured in Setup → Account Mapping
+ * under the key 'paypal_sales_item'.
+ * Returns null when not yet configured (triggers JE fallback).
  */
+async function getSalesItem() {
+  const row = await db('account_mappings').where({ mapping_key: 'paypal_sales_item' }).first();
+  return row?.qbo_account_id
+    ? { id: row.qbo_account_id, name: row.qbo_account_name || 'PayPal Sales' }
+    : null;
+}
+
+/**
+ * Resolve the default QBO Customer used when the reviewer has not picked
+ * a specific customer.  Configured in Setup → Account Mapping under the
+ * key 'paypal_default_customer'.
+ * Returns null when not configured (triggers JE fallback).
+ */
+async function getDefaultCustomer() {
+  const row = await db('account_mappings').where({ mapping_key: 'paypal_default_customer' }).first();
+  return row?.qbo_account_id
+    ? { id: row.qbo_account_id, name: row.qbo_account_name || 'PayPal Customer' }
+    : null;
+}
+
+/** Standard PrivateNote for any QBO object. */
+function buildNote(tx, meta) {
+  return [
+    `PayPal Tx ${tx.paypal_transaction_id}`,
+    tx.payer_name ? `Payer: ${tx.payer_name}` : null,
+    meta.memo     ? `Note: ${meta.memo}`       : null,
+  ].filter(Boolean).join(' | ');
+}
+
+/**
+ * Build entity/class options from qbo_metadata.
+ * Used by JournalEntry line helpers only.
+ * (Purchase and SalesReceipt handle entity/class slightly differently.)
+ */
+function metaOptions(meta, entityType) {
+  const opts = {};
+  const id   = entityType === 'Customer' ? meta.customer_id  : meta.vendor_id;
+  const name = entityType === 'Customer' ? meta.customer_name : meta.vendor_name;
+  if (id) opts.entity = { Type: entityType, EntityRef: { value: id, name: name || '' } };
+  if (meta.class_id) opts.classRef = { value: meta.class_id, name: meta.class_name || '' };
+  return opts;
+}
+
+// ── JournalEntry helpers (retained for fallback, adjustment, conversion) ───
+
 function line(postingType, accountRef, amount, description, options = {}) {
   const detail = {
     PostingType: postingType,
@@ -134,27 +160,12 @@ function line(postingType, accountRef, amount, description, options = {}) {
   };
   if (options.entity)   detail.Entity   = options.entity;
   if (options.classRef) detail.ClassRef = options.classRef;
-
   return {
     JournalEntryLineDetail: detail,
     Amount:      parseFloat(Math.abs(amount).toFixed(2)),
     DetailType:  'JournalEntryLineDetail',
     Description: description || '',
   };
-}
-
-/** Build entity/class options from qbo_metadata. */
-function metaOptions(meta, entityType) {
-  const opts = {};
-  const id   = entityType === 'Customer' ? meta.customer_id  : meta.vendor_id;
-  const name = entityType === 'Customer' ? meta.customer_name : meta.vendor_name;
-  if (id) {
-    opts.entity = { Type: entityType, EntityRef: { value: id, name: name || '' } };
-  }
-  if (meta.class_id) {
-    opts.classRef = { value: meta.class_id, name: meta.class_name || '' };
-  }
-  return opts;
 }
 
 function buildJE(lines, tx, meta, docSuffix = '') {
@@ -164,111 +175,246 @@ function buildJE(lines, tx, meta, docSuffix = '') {
       Line:        lines,
       TxnDate:     tx.transaction_date,
       DocNumber:   `PP${docSuffix}-${tx.paypal_transaction_id}`.slice(0, 21),
-      PrivateNote: [
-        `PayPal Tx ${tx.paypal_transaction_id}`,
-        tx.payer_name ? `Payer: ${tx.payer_name}` : null,
-        meta.memo     ? `Note: ${meta.memo}`       : null,
-      ].filter(Boolean).join(' | '),
+      PrivateNote: buildNote(tx, meta),
     },
   };
 }
 
+// ── Purchase (Expense) payload builder ─────────────────────────────────────
+/**
+ * Build a QBO Purchase object payload.
+ *   QBO API endpoint: POST /purchase   (UI label: "Expense")
+ *
+ * paymentAccount — where the money was paid FROM (PayPal Bank or PayPal Credit).
+ * expenseAccount — the expense category account (line level).
+ * meta           — full qbo_metadata; entity = Vendor unless entityType overridden.
+ * docSuffix      — appended between "PP" and "-{txId}" in DocNumber.
+ */
+function buildPurchasePayload(tx, meta, { paymentAccount, expenseAccount, amount, docSuffix, description, entityType }) {
+  const opts     = metaOptions(meta, entityType || 'Vendor');
+  const classRef = opts.classRef;
+
+  const lineItem = {
+    Amount:     parseFloat(Math.abs(amount).toFixed(2)),
+    DetailType: 'AccountBasedExpenseLineDetail',
+    AccountBasedExpenseLineDetail: {
+      AccountRef: { value: expenseAccount.id, name: expenseAccount.name },
+      ...(classRef ? { ClassRef: classRef } : {}),
+    },
+    Description: (description || '').slice(0, 255),
+  };
+
+  const payload = {
+    PaymentType: 'Cash',
+    AccountRef:  { value: paymentAccount.id, name: paymentAccount.name },
+    TxnDate:     tx.transaction_date,
+    DocNumber:   `PP${docSuffix || ''}-${tx.paypal_transaction_id}`.slice(0, 21),
+    PrivateNote: buildNote(tx, meta),
+    TotalAmt:    parseFloat(Math.abs(amount).toFixed(2)),
+    Line:        [lineItem],
+  };
+
+  // Vendor/Customer entity at the document level (not inside lines for Purchase)
+  if (opts.entity) {
+    payload.EntityRef = {
+      value: opts.entity.EntityRef.value,
+      name:  opts.entity.EntityRef.name,
+      Type:  opts.entity.Type,
+    };
+  }
+
+  return { type: 'Purchase', payload };
+}
+
 // ── Per-category builders ──────────────────────────────────────────────────
 
+/**
+ * Income: SalesReceipt (gross amount) + companion Purchase for the fee.
+ *
+ * The fee Purchase is ALWAYS created when fee > 0 because without it
+ * the PayPal Bank account would show +gross but only +net was deposited —
+ * causing a reconciliation discrepancy.
+ *
+ * Falls back to JournalEntry if paypal_sales_item or default customer
+ * is not yet configured in Setup → Account Mapping.
+ */
 async function buildSale(tx) {
-  const meta = parseMeta(tx);
+  const meta        = parseMeta(tx);
+  const salesItem   = await getSalesItem();
+  const defCustomer = await getDefaultCustomer();
 
-  const paypalBank  = await getPaypalAccount(meta, tx);
-  const paypalFees  = await getAccountId('paypal_fees', tx);
+  const customerId   = meta.customer_id   || defCustomer?.id   || null;
+  const customerName = meta.customer_name || defCustomer?.name || 'PayPal Customer';
 
-  // Prefer specific income account chosen by reviewer; fall back to mapped paypal_sales.
+  if (!salesItem || !customerId) {
+    logger.warn(
+      !salesItem
+        ? `paypal_sales_item not configured in Setup — using JournalEntry fallback for ${tx.paypal_transaction_id}`
+        : `No customer available for SalesReceipt — using JournalEntry fallback for ${tx.paypal_transaction_id}`
+    );
+    return buildSaleAsJE(tx);
+  }
+
+  const paypalBank = await getPaypalAccount(meta, tx);
+  const gross      = Math.abs(parseFloat(tx.gross_amount));
+  const fee        = Math.abs(parseFloat(tx.fee_amount || 0));
+  const memo       = meta.memo || tx.description || tx.payer_name || '';
+  const classRef   = meta.class_id ? { value: meta.class_id, name: meta.class_name || '' } : null;
+
+  const srPayload = {
+    CustomerRef:         { value: customerId, name: customerName },
+    TxnDate:             tx.transaction_date,
+    DocNumber:           `PP-${tx.paypal_transaction_id}`.slice(0, 21),
+    PrivateNote:         buildNote(tx, meta),
+    DepositToAccountRef: { value: paypalBank.id, name: paypalBank.name },
+    Line: [
+      {
+        Amount:     parseFloat(gross.toFixed(2)),
+        DetailType: 'SalesItemLineDetail',
+        SalesItemLineDetail: {
+          ItemRef: { value: salesItem.id, name: salesItem.name },
+          ...(classRef ? { ClassRef: classRef } : {}),
+        },
+        Description: `PayPal sale — ${memo}`.slice(0, 255),
+      },
+    ],
+  };
+
+  const sr = { type: 'SalesReceipt', payload: srPayload };
+
+  if (fee > 0) {
+    // Companion Purchase records the fee so PayPal Bank net is correct.
+    const paypalFees = await getAccountId('paypal_fees', tx);
+    const feeObj = buildPurchasePayload(tx, meta, {
+      paymentAccount: paypalBank,
+      expenseAccount: paypalFees,
+      amount:         fee,
+      docSuffix:      'FEE',
+      description:    `PayPal processing fee — ${tx.paypal_transaction_id}`,
+      entityType:     'Vendor',   // fee has no entity but class may apply
+    });
+    return { type: 'SaleWithFee', primary: sr, fee: feeObj };
+  }
+
+  return sr;
+}
+
+/**
+ * JournalEntry fallback for sales when paypal_sales_item or customer
+ * is not configured.  Also handles the legacy split_fee JE mode.
+ */
+async function buildSaleAsJE(tx) {
+  const meta          = parseMeta(tx);
+  const paypalBank    = await getPaypalAccount(meta, tx);
+  const paypalFees    = await getAccountId('paypal_fees', tx);
   const incomeAccount = meta.income_account_id
     ? { id: meta.income_account_id, name: meta.income_account_name || 'Income' }
     : await getAccountId('paypal_sales', tx);
 
-  const gross = Math.abs(tx.gross_amount);
-  const fee   = Math.abs(tx.fee_amount);
-  const net   = gross - fee;
-
+  const gross      = Math.abs(parseFloat(tx.gross_amount));
+  const fee        = Math.abs(parseFloat(tx.fee_amount || 0));
+  const net        = gross - fee;
   const incomeOpts = metaOptions(meta, 'Customer');
   const memo       = meta.memo || tx.description || tx.payer_name || '';
 
-  const lines = [
+  // Legacy split_fee mode: two separate JEs
+  if (meta.split_fee && fee > 0) {
+    const saleJE = buildJE([
+      line('Debit',  paypalBank,    gross, `PayPal sale — gross ${tx.paypal_transaction_id}`),
+      line('Credit', incomeAccount, gross, `PayPal sale — ${memo}`, incomeOpts),
+    ], tx, meta);
+    const feeJE = buildJE([
+      line('Debit',  paypalFees, fee, `PayPal fee — ${tx.paypal_transaction_id}`),
+      line('Credit', paypalBank, fee, 'PayPal Balance — fee deducted'),
+    ], tx, meta, '-FEE');
+    return { type: 'SplitSale', primary: saleJE, fee: feeJE };
+  }
+
+  // Standard 3-line JE
+  const jeLines = [
     line('Debit',  paypalBank,    net,   `PayPal payment — net ${tx.paypal_transaction_id}`),
     line('Credit', incomeAccount, gross, `PayPal sale — ${memo}`, incomeOpts),
   ];
-  if (fee > 0) {
-    lines.splice(1, 0, line('Debit', paypalFees, fee, 'PayPal processing fee'));
-  }
-
-  return buildJE(lines, tx, meta);
+  if (fee > 0) jeLines.splice(1, 0, line('Debit', paypalFees, fee, 'PayPal processing fee'));
+  return buildJE(jeLines, tx, meta);
 }
 
+/**
+ * Standalone PayPal fee / international fee:
+ * Purchase paid from PayPal Bank → PayPal Fees expense account.
+ */
 async function buildPaypalFee(tx) {
-  const meta = parseMeta(tx);
-
-  const paypalBank = await getPaypalAccount(meta, tx);
-
-  // Use reviewer-chosen expense account if provided; otherwise PayPal Fees mapping.
-  const feeAccount = meta.expense_account_id
+  const meta         = parseMeta(tx);
+  const paypalBank   = await getPaypalAccount(meta, tx);
+  const feeAccount   = meta.expense_account_id
     ? { id: meta.expense_account_id, name: meta.expense_account_name || 'Expense' }
     : await getAccountId('paypal_fees', tx);
+  const amount = Math.abs(parseFloat(tx.gross_amount || tx.fee_amount || 0));
+  const memo   = meta.memo || tx.description || '';
 
-  const amount     = Math.abs(tx.gross_amount || tx.fee_amount);
-  const expOpts    = metaOptions(meta, 'Vendor');
-
-  return buildJE([
-    line('Debit',  feeAccount, amount, `PayPal fee: ${meta.memo || tx.description || ''}`, expOpts),
-    line('Credit', paypalBank, amount, 'PayPal Balance'),
-  ], tx, meta);
+  return buildPurchasePayload(tx, meta, {
+    paymentAccount: paypalBank,
+    expenseAccount: feeAccount,
+    amount,
+    description:    `PayPal fee: ${memo}`,
+  });
 }
 
+/**
+ * PayPal Credit purchase:
+ * Purchase paid from PayPal Credit (liability) — NEVER from PayPal Bank.
+ * The credit card liability increases; no PayPal Bank movement.
+ */
 async function buildCreditPurchase(tx) {
-  const meta = parseMeta(tx);
-
-  const paypalCredit = await getAccountId('paypal_credit', tx);
-
-  // Use reviewer-chosen expense account; fall back to suggested or uncategorized.
+  const meta          = parseMeta(tx);
+  // CRITICAL: payment account must be PayPal Credit, not PayPal Bank.
+  const paypalCredit  = await getAccountId('paypal_credit', tx);
   const expenseAccount = meta.expense_account_id
     ? { id: meta.expense_account_id, name: meta.expense_account_name || 'Expense' }
-    : await getAccountId(
-        tx.suggested_qbo_account_key === 'paypal_credit' ? 'uncategorized' : (tx.suggested_qbo_account_key || 'uncategorized'),
-        tx
-      );
+    : await getAccountId('uncategorized', tx);
+  const amount = Math.abs(parseFloat(tx.gross_amount));
+  const memo   = meta.memo || tx.description || '';
 
-  const amount  = Math.abs(tx.gross_amount);
-  const expOpts = metaOptions(meta, 'Vendor');
-
-  return buildJE([
-    line('Debit',  expenseAccount, amount, `PayPal Credit purchase: ${meta.memo || tx.description || ''}`, expOpts),
-    line('Credit', paypalCredit,   amount, 'PayPal Credit liability'),
-  ], tx, meta);
+  return buildPurchasePayload(tx, meta, {
+    paymentAccount: paypalCredit,     // ← PayPal Credit liability, not PayPal Bank
+    expenseAccount,
+    amount,
+    docSuffix:      'CC',
+    description:    `PayPal Credit purchase: ${memo}`,
+  });
 }
 
+/**
+ * PayPal Credit repayment:
+ * Transfer from PayPal Bank → PayPal Credit liability.
+ * Reduces the credit card balance — no P&L impact.
+ */
 async function buildCreditRepayment(tx) {
-  const meta        = parseMeta(tx);
+  const meta         = parseMeta(tx);
   const paypalCredit = await getAccountId('paypal_credit', tx);
   const paypalBank   = await getPaypalAccount(meta, tx);
-  const amount       = Math.abs(tx.gross_amount);
+  const amount       = Math.abs(parseFloat(tx.gross_amount));
 
-  return buildJE([
-    line('Debit',  paypalCredit, amount, 'PayPal Credit repayment — reduce liability'),
-    line('Credit', paypalBank,   amount, 'PayPal Balance'),
-  ], tx, meta);
+  return {
+    type: 'Transfer',
+    payload: {
+      Amount:         parseFloat(amount.toFixed(2)),
+      FromAccountRef: { value: paypalBank.id,  name: paypalBank.name  },
+      ToAccountRef:   { value: paypalCredit.id, name: paypalCredit.name },
+      TxnDate:        tx.transaction_date,
+      PrivateNote:    buildNote(tx, meta),
+    },
+  };
 }
 
+/** Bank → PayPal funding transfer. */
 async function buildBankTransferIn(tx) {
   const meta = parseMeta(tx);
-
-  // If the reviewer approved an existing QBO bank match, link to it rather
-  // than creating a new Transfer that would duplicate the entry.
-  if (meta.bank_match?.qbo_id) {
-    return { type: 'BankMatchLink', bankMatch: meta.bank_match };
-  }
+  if (meta.bank_match?.qbo_id) return { type: 'BankMatchLink', bankMatch: meta.bank_match };
 
   const bankAccount = await getBankAccount(meta, tx);
   const paypalBank  = await getPaypalAccount(meta, tx);
-  const amount      = Math.abs(tx.gross_amount);
+  const amount      = Math.abs(parseFloat(tx.gross_amount));
 
   return {
     type: 'Transfer',
@@ -277,23 +423,19 @@ async function buildBankTransferIn(tx) {
       FromAccountRef: { value: bankAccount.id, name: bankAccount.name },
       ToAccountRef:   { value: paypalBank.id,  name: paypalBank.name  },
       TxnDate:        tx.transaction_date,
-      PrivateNote:    `Bank → PayPal funding ${tx.paypal_transaction_id}${meta.memo ? ` | ${meta.memo}` : ''}`,
+      PrivateNote:    buildNote(tx, meta),
     },
   };
 }
 
+/** PayPal → bank withdrawal. */
 async function buildBankTransferOut(tx) {
   const meta = parseMeta(tx);
-
-  // If the reviewer approved an existing QBO bank match, link to it rather
-  // than creating a new Transfer that would duplicate the entry.
-  if (meta.bank_match?.qbo_id) {
-    return { type: 'BankMatchLink', bankMatch: meta.bank_match };
-  }
+  if (meta.bank_match?.qbo_id) return { type: 'BankMatchLink', bankMatch: meta.bank_match };
 
   const paypalBank  = await getPaypalAccount(meta, tx);
   const bankAccount = await getBankAccount(meta, tx);
-  const amount      = Math.abs(tx.gross_amount);
+  const amount      = Math.abs(parseFloat(tx.gross_amount));
 
   return {
     type: 'Transfer',
@@ -302,38 +444,45 @@ async function buildBankTransferOut(tx) {
       FromAccountRef: { value: paypalBank.id,  name: paypalBank.name  },
       ToAccountRef:   { value: bankAccount.id, name: bankAccount.name },
       TxnDate:        tx.transaction_date,
-      PrivateNote:    `PayPal → Bank withdrawal ${tx.paypal_transaction_id}${meta.memo ? ` | ${meta.memo}` : ''}`,
+      PrivateNote:    buildNote(tx, meta),
     },
   };
 }
 
+/**
+ * Payout / mass payment / general purchase:
+ * Purchase paid from PayPal Bank → uncategorized (or reviewer-chosen) expense account.
+ */
 async function buildPayout(tx) {
-  const meta = parseMeta(tx);
-
+  const meta    = parseMeta(tx);
   const paypalBank = await getPaypalAccount(meta, tx);
-
-  // Use reviewer-chosen expense account; fall back to uncategorized (payouts aren't fees).
   const expenseAccount = meta.expense_account_id
     ? { id: meta.expense_account_id, name: meta.expense_account_name || 'Expense' }
     : await getAccountId('uncategorized', tx);
+  const amount = Math.abs(parseFloat(tx.gross_amount));
+  const memo   = meta.memo || tx.description || '';
 
-  const amount  = Math.abs(tx.gross_amount);
-  const expOpts = metaOptions(meta, 'Vendor');
-
-  return buildJE([
-    line('Debit',  expenseAccount, amount, `Payout: ${meta.memo || tx.description || ''}`, expOpts),
-    line('Credit', paypalBank,     amount, 'PayPal Balance'),
-  ], tx, meta, '-PAY');
+  return buildPurchasePayload(tx, meta, {
+    paymentAccount: paypalBank,
+    expenseAccount,
+    amount,
+    docSuffix:      'PAY',
+    description:    `Payout: ${memo}`,
+  });
 }
 
+/**
+ * Account adjustment:
+ * JournalEntry — credit (Dr PayPal Bank / Cr income) or debit (Dr expense / Cr PayPal Bank).
+ * No cleaner native QBO object exists for adjustments.
+ */
 async function buildAdjustment(tx) {
-  const meta      = parseMeta(tx);
+  const meta       = parseMeta(tx);
   const paypalBank = await getPaypalAccount(meta, tx);
-  const amount     = Math.abs(tx.gross_amount);
+  const amount     = Math.abs(parseFloat(tx.gross_amount));
   const isCredit   = parseFloat(tx.gross_amount) > 0;
 
   if (isCredit) {
-    // Credit adjustment — money added to PayPal balance.
     const incomeAccount = meta.income_account_id
       ? { id: meta.income_account_id, name: meta.income_account_name || 'Income' }
       : await getAccountId('uncategorized', tx);
@@ -342,7 +491,6 @@ async function buildAdjustment(tx) {
       line('Credit', incomeAccount, amount, `Adjustment: ${meta.memo || tx.description || ''}`),
     ], tx, meta, '-ADJ');
   } else {
-    // Debit adjustment — money removed from PayPal balance.
     const expenseAccount = meta.expense_account_id
       ? { id: meta.expense_account_id, name: meta.expense_account_name || 'Expense' }
       : await getAccountId('uncategorized', tx);
@@ -353,14 +501,17 @@ async function buildAdjustment(tx) {
   }
 }
 
+/**
+ * Currency conversion gain/loss:
+ * JournalEntry — FX gain (Dr PayPal Bank / Cr income) or loss (Dr expense / Cr PayPal Bank).
+ */
 async function buildCurrencyConversion(tx) {
-  const meta      = parseMeta(tx);
+  const meta       = parseMeta(tx);
   const paypalBank = await getPaypalAccount(meta, tx);
-  const amount     = Math.abs(tx.gross_amount);
+  const amount     = Math.abs(parseFloat(tx.gross_amount));
   const isGain     = parseFloat(tx.gross_amount) > 0;
 
   if (isGain) {
-    // FX gain — net positive from the conversion.
     const gainAccount = meta.income_account_id
       ? { id: meta.income_account_id, name: meta.income_account_name || 'Income' }
       : await getAccountId('uncategorized', tx);
@@ -369,7 +520,6 @@ async function buildCurrencyConversion(tx) {
       line('Credit', gainAccount, amount, `Currency conversion gain: ${meta.memo || tx.description || ''}`),
     ], tx, meta, '-FX');
   } else {
-    // FX loss — net negative from the conversion.
     const lossAccount = meta.expense_account_id
       ? { id: meta.expense_account_id, name: meta.expense_account_name || 'Expense' }
       : await getAccountId('uncategorized', tx);
@@ -380,47 +530,100 @@ async function buildCurrencyConversion(tx) {
   }
 }
 
+/**
+ * Refund / chargeback:
+ *
+ *  Issued (gross < 0):
+ *    RefundReceipt — Customer, amount, DepositToAccountRef = PayPal Bank.
+ *    Falls back to JournalEntry if Sales Item / Customer not configured.
+ *
+ *  Received / won (gross > 0):
+ *    JournalEntry — Dr PayPal Bank / Cr Expense (vendor credit or chargeback win).
+ */
 async function buildRefund(tx) {
   const meta     = parseMeta(tx);
-  const gross    = Math.abs(tx.gross_amount);
-  const fee      = Math.abs(tx.fee_amount);
-  const net      = gross - fee;
-  const isIssued = parseFloat(tx.gross_amount) < 0; // we issued a refund (money out)
+  const gross    = parseFloat(tx.gross_amount);
+  const isIssued = gross < 0;
 
-  const paypalBank  = await getPaypalAccount(meta, tx);
-  const paypalFees  = await getAccountId('paypal_fees',  tx);
+  const paypalBank = await getPaypalAccount(meta, tx);
 
   if (isIssued) {
-    // Money OUT — refund issued to a customer.
-    // Dr Income Account (reverse the income), Cr PayPal Bank + Cr Fees returned.
-    const incomeAccount = meta.income_account_id
-      ? { id: meta.income_account_id, name: meta.income_account_name || 'Income' }
-      : await getAccountId('paypal_sales', tx);
+    // ── RefundReceipt to customer ──────────────────────────────────────────
+    const salesItem   = await getSalesItem();
+    const defCustomer = await getDefaultCustomer();
+    const customerId  = meta.customer_id   || defCustomer?.id   || null;
+    const customerName = meta.customer_name || defCustomer?.name || 'PayPal Customer';
 
-    const custOpts = metaOptions(meta, 'Customer');
-
-    const lines = [
-      line('Debit',  incomeAccount, gross, `Refund issued: ${meta.memo || tx.description || ''}`, custOpts),
-      line('Credit', paypalBank,    net,   'PayPal Balance refunded'),
-    ];
-    if (fee > 0) {
-      lines.splice(1, 0, line('Credit', paypalFees, fee, 'Fee returned on refund'));
+    if (!salesItem || !customerId) {
+      logger.warn(
+        `RefundReceipt fallback to JE for ${tx.paypal_transaction_id} — item/customer not configured in Setup`
+      );
+      return buildRefundAsJE(tx);
     }
-    return buildJE(lines, tx, meta, '-RF');
+
+    const absGross = Math.abs(gross);
+    const classRef = meta.class_id ? { value: meta.class_id, name: meta.class_name || '' } : null;
+
+    return {
+      type: 'RefundReceipt',
+      payload: {
+        CustomerRef:         { value: customerId, name: customerName },
+        TxnDate:             tx.transaction_date,
+        PaymentRefNum:       tx.paypal_transaction_id,
+        PrivateNote:         buildNote(tx, meta),
+        DepositToAccountRef: { value: paypalBank.id, name: paypalBank.name },
+        Line: [
+          {
+            Amount:     parseFloat(absGross.toFixed(2)),
+            DetailType: 'SalesItemLineDetail',
+            SalesItemLineDetail: {
+              ItemRef: { value: salesItem.id, name: salesItem.name },
+              ...(classRef ? { ClassRef: classRef } : {}),
+            },
+            Description: `Refund: ${meta.memo || tx.description || ''}`.slice(0, 255),
+          },
+        ],
+      },
+    };
   } else {
-    // Money IN — credit/refund received from a vendor.
-    // Dr PayPal Bank, Cr Expense Account.
+    // ── Vendor credit / chargeback won → JournalEntry ────────────────────
+    const absGross = Math.abs(gross);
+    const absFee   = Math.abs(parseFloat(tx.fee_amount || 0));
+    const absNet   = absGross - absFee;
+    const paypalFees = await getAccountId('paypal_fees', tx);
     const expenseAccount = meta.expense_account_id
       ? { id: meta.expense_account_id, name: meta.expense_account_name || 'Expense' }
       : await getAccountId('uncategorized', tx);
-
     const vendOpts = metaOptions(meta, 'Vendor');
 
-    return buildJE([
-      line('Debit',  paypalBank,      gross, 'PayPal Balance — vendor refund received'),
-      line('Credit', expenseAccount,  gross, `Vendor credit: ${meta.memo || tx.description || ''}`, vendOpts),
-    ], tx, meta, '-CR');
+    const jeLines = [
+      line('Debit',  paypalBank,     absFee > 0 ? absNet : absGross, 'PayPal Balance — credit/win received'),
+      line('Credit', expenseAccount, absGross, `Vendor credit: ${meta.memo || tx.description || ''}`, vendOpts),
+    ];
+    if (absFee > 0) jeLines.splice(1, 0, line('Debit', paypalFees, absFee, 'Fee returned'));
+    return buildJE(jeLines, tx, meta, '-CR');
   }
+}
+
+/** JournalEntry fallback for refunds when Sales Item / Customer not configured. */
+async function buildRefundAsJE(tx) {
+  const meta          = parseMeta(tx);
+  const gross         = Math.abs(parseFloat(tx.gross_amount));
+  const fee           = Math.abs(parseFloat(tx.fee_amount || 0));
+  const net           = gross - fee;
+  const paypalBank    = await getPaypalAccount(meta, tx);
+  const paypalFees    = await getAccountId('paypal_fees', tx);
+  const incomeAccount = meta.income_account_id
+    ? { id: meta.income_account_id, name: meta.income_account_name || 'Income' }
+    : await getAccountId('paypal_sales', tx);
+  const custOpts = metaOptions(meta, 'Customer');
+
+  const jeLines = [
+    line('Debit',  incomeAccount, gross, `Refund issued: ${meta.memo || tx.description || ''}`, custOpts),
+    line('Credit', paypalBank,    net,   'PayPal Balance refunded'),
+  ];
+  if (fee > 0) jeLines.splice(1, 0, line('Credit', paypalFees, fee, 'Fee returned on refund'));
+  return buildJE(jeLines, tx, meta, '-RF');
 }
 
 // ── Router ─────────────────────────────────────────────────────────────────
@@ -428,32 +631,30 @@ async function buildRefund(tx) {
 async function buildQBOPayload(tx) {
   const category = tx.override_category || tx.category;
   switch (category) {
-    // ── Core income ──────────────────────────────────────────────────────────
-    case 'sale':                    return buildSale(tx);
-    case 'subscription':            return buildSale(tx);          // recurring income, same JE
-    case 'donation_received':       return buildSale(tx);          // income JE, user picks account
+    // ── SalesReceipt (income) ─────────────────────────────────────────────
+    case 'sale':              return buildSale(tx);
+    case 'subscription':      return buildSale(tx);
+    case 'donation_received': return buildSale(tx);
 
-    // ── Fees & expenses ──────────────────────────────────────────────────────
-    case 'paypal_fee':              return buildPaypalFee(tx);
-    case 'international_fee':       return buildPaypalFee(tx);     // same JE, user picks account
-    case 'purchase':                return buildPayout(tx);        // general expense payment; same JE
-    case 'payout':                  return buildPayout(tx);        // mass payment / disbursement
+    // ── Purchase / Expense ────────────────────────────────────────────────
+    case 'paypal_fee':             return buildPaypalFee(tx);
+    case 'international_fee':      return buildPaypalFee(tx);
+    case 'purchase':               return buildPayout(tx);
+    case 'payout':                 return buildPayout(tx);
+    case 'paypal_credit_purchase': return buildCreditPurchase(tx);
 
-    // ── PayPal Credit ────────────────────────────────────────────────────────
-    case 'paypal_credit_purchase':  return buildCreditPurchase(tx);
+    // ── Transfer ──────────────────────────────────────────────────────────
     case 'paypal_credit_repayment': return buildCreditRepayment(tx);
-
-    // ── Bank transfers ───────────────────────────────────────────────────────
     case 'bank_transfer_in':        return buildBankTransferIn(tx);
     case 'bank_transfer_out':       return buildBankTransferOut(tx);
 
-    // ── Reversals ────────────────────────────────────────────────────────────
-    case 'refund':                  return buildRefund(tx);
-    case 'chargeback':              return buildRefund(tx);        // same reversal logic
+    // ── RefundReceipt ─────────────────────────────────────────────────────
+    case 'refund':     return buildRefund(tx);
+    case 'chargeback': return buildRefund(tx);
 
-    // ── Other ────────────────────────────────────────────────────────────────
-    case 'adjustment':              return buildAdjustment(tx);
-    case 'currency_conversion':     return buildCurrencyConversion(tx);
+    // ── JournalEntry (no cleaner native object) ───────────────────────────
+    case 'adjustment':          return buildAdjustment(tx);
+    case 'currency_conversion': return buildCurrencyConversion(tx);
 
     default:
       throw new Error(`Cannot sync category "${category}" — classify or approve the transaction first.`);
@@ -461,23 +662,13 @@ async function buildQBOPayload(tx) {
 }
 
 // ── Bank match linker ──────────────────────────────────────────────────────
-//
-// When the reviewer has approved an existing QBO bank transaction as the
-// match for a PayPal transfer, we don't create a new object — we just stamp
-// our PayPal transaction ID onto the existing QBO object's PrivateNote and
-// record its ID as the linked QBO object.
-//
-// Supported qbo_type values: Transfer | Deposit | Purchase
 
 async function linkBankMatch(tx, bankMatch) {
   const { qbo_id, qbo_type } = bankMatch;
   const meta = parseMeta(tx);
 
-  if (!qbo_id || !qbo_type) {
-    throw new Error('Bank match is missing qbo_id or qbo_type.');
-  }
+  if (!qbo_id || !qbo_type) throw new Error('Bank match is missing qbo_id or qbo_type.');
 
-  // Fetch the existing QBO object to get its current SyncToken (required for update).
   const existing = await qbo.getObject(qbo_type, qbo_id);
   if (!existing) {
     throw new Error(
@@ -486,7 +677,6 @@ async function linkBankMatch(tx, bankMatch) {
     );
   }
 
-  // Append our PayPal reference to the note (idempotent — won't duplicate if re-synced).
   const ppRef       = `PayPal Tx ${tx.paypal_transaction_id}`;
   const currentNote = existing.PrivateNote || '';
   const newNote     = currentNote.includes(ppRef)
@@ -506,31 +696,61 @@ async function linkBankMatch(tx, bankMatch) {
 // ── Sync a single transaction ──────────────────────────────────────────────
 
 async function syncTransaction(tx, userId) {
-  if (tx.status === 'synced') throw new Error('Transaction already synced to QBO.');
+  if (tx.status === 'synced')   throw new Error('Transaction already synced to QBO.');
   if (tx.status !== 'approved') throw new Error('Transaction must be approved before syncing.');
 
-  const built           = await buildQBOPayload(tx);
+  const built = await buildQBOPayload(tx);
+
   const isBankMatchLink = built.type === 'BankMatchLink';
+  const isSaleWithFee   = built.type === 'SaleWithFee';   // SalesReceipt + Purchase
+  const isSplitSale     = built.type === 'SplitSale';     // legacy: JE + JE
   const logAction       = isBankMatchLink ? 'link' : 'create';
 
   let qboId, qboSyncToken, qboObjectType, qboObject;
+  let feeQboId, feeQboSyncToken, feeQboObjectType;
 
   try {
     if (isBankMatchLink) {
-      // ── Link path: stamp PayPal ref onto the existing QBO object ──────────
+      // ── Link existing QBO object ─────────────────────────────────────────
       const result = await linkBankMatch(tx, built.bankMatch);
       qboId         = result.qboId;
       qboSyncToken  = result.qboSyncToken;
       qboObjectType = result.qboObjectType;
       qboObject     = result.qboObject;
+
+    } else if (isSaleWithFee) {
+      // ── SalesReceipt (primary) + Purchase fee ────────────────────────────
+      qboObjectType = 'SalesReceipt';
+      qboObject     = await qbo.createSalesReceipt(built.primary.payload);
+      qboId         = qboObject.Id;
+      qboSyncToken  = qboObject.SyncToken;
+
+      const feeObj  = await qbo.createPurchase(built.fee.payload);
+      feeQboId         = feeObj.Id;
+      feeQboSyncToken  = feeObj.SyncToken;
+      feeQboObjectType = 'Purchase';
+
+    } else if (isSplitSale) {
+      // ── Legacy: two JournalEntries ───────────────────────────────────────
+      qboObjectType = 'JournalEntry';
+      qboObject     = await qbo.createJournalEntry(built.primary.payload);
+      qboId         = qboObject.Id;
+      qboSyncToken  = qboObject.SyncToken;
+
+      const feeObj  = await qbo.createJournalEntry(built.fee.payload);
+      feeQboId         = feeObj.Id;
+      feeQboSyncToken  = feeObj.SyncToken;
+      feeQboObjectType = 'JournalEntry';
+
     } else {
-      // ── Create path: post a new object to QBO ────────────────────────────
+      // ── Standard single-object path ──────────────────────────────────────
       const { type, payload } = built;
       qboObjectType = type;
       switch (type) {
         case 'JournalEntry':  qboObject = await qbo.createJournalEntry(payload);  break;
         case 'Transfer':      qboObject = await qbo.createTransfer(payload);       break;
         case 'Purchase':      qboObject = await qbo.createPurchase(payload);       break;
+        case 'SalesReceipt':  qboObject = await qbo.createSalesReceipt(payload);  break;
         case 'RefundReceipt': qboObject = await qbo.createRefundReceipt(payload);  break;
         default: throw new Error(`Unknown QBO object type: ${type}`);
       }
@@ -538,17 +758,27 @@ async function syncTransaction(tx, userId) {
       qboSyncToken = qboObject.SyncToken;
     }
   } catch (err) {
+    // Determine the primary type name for the log
+    const failType = isBankMatchLink  ? built.bankMatch?.qbo_type
+                   : isSaleWithFee    ? 'SalesReceipt'
+                   : isSplitSale      ? 'JournalEntry'
+                   : built.type;
+
     await db('qbo_sync_logs').insert({
       transaction_id:        tx.id,
       paypal_transaction_id: tx.paypal_transaction_id,
       action:                logAction,
-      qbo_object_type:       isBankMatchLink ? built.bankMatch?.qbo_type : built.type,
-      qbo_object_id:         isBankMatchLink ? built.bankMatch?.qbo_id   : null,
+      qbo_object_type:       failType,
+      qbo_object_id:         isBankMatchLink ? built.bankMatch?.qbo_id : null,
       status:                'failed',
-      request_payload:       JSON.stringify(isBankMatchLink ? built.bankMatch : built.payload),
-      error_message:         err.message,
-      performed_by:          userId,
-      created_at:            new Date(), updated_at: new Date(),
+      request_payload:       JSON.stringify(
+        isBankMatchLink             ? built.bankMatch :
+        isSaleWithFee || isSplitSale ? { primary: built.primary.payload, fee: built.fee.payload } :
+        built.payload
+      ),
+      error_message: err.message,
+      performed_by:  userId,
+      created_at:    new Date(), updated_at: new Date(),
     });
     await db('normalized_transactions').where({ id: tx.id }).update({
       status:     'failed',
@@ -558,14 +788,30 @@ async function syncTransaction(tx, userId) {
     throw err;
   }
 
+  // Persist fee object IDs + type so rollback can delete both entries.
+  const currentMeta = parseMeta(tx);
+  const updatedMeta = feeQboId
+    ? { ...currentMeta, fee_qbo_id: feeQboId, fee_qbo_sync_token: feeQboSyncToken, fee_qbo_type: feeQboObjectType }
+    : currentMeta;
+
   await db('normalized_transactions').where({ id: tx.id }).update({
     status:          'synced',
     qbo_object_id:   qboId,
     qbo_object_type: qboObjectType,
     qbo_sync_token:  qboSyncToken,
-    sync_error:      null,   // clear any previous failure message
+    qbo_metadata:    JSON.stringify(updatedMeta),
+    sync_error:      null,
     updated_at:      new Date(),
   });
+
+  // Build log payload
+  const logPayload = isBankMatchLink              ? built.bankMatch
+                   : (isSaleWithFee || isSplitSale) ? { primary: built.primary.payload, fee: built.fee.payload }
+                   : built.payload;
+
+  const logResponse = (isSaleWithFee || isSplitSale)
+    ? { primary: qboObject, fee: { Id: feeQboId, SyncToken: feeQboSyncToken } }
+    : qboObject;
 
   await db('qbo_sync_logs').insert({
     transaction_id:        tx.id,
@@ -574,8 +820,8 @@ async function syncTransaction(tx, userId) {
     qbo_object_type:       qboObjectType,
     qbo_object_id:         qboId,
     status:                'success',
-    request_payload:       JSON.stringify(isBankMatchLink ? built.bankMatch : built.payload),
-    response_payload:      JSON.stringify(qboObject),
+    request_payload:       JSON.stringify(logPayload),
+    response_payload:      JSON.stringify(logResponse),
     performed_by:          userId,
     created_at:            new Date(), updated_at: new Date(),
   });
@@ -587,7 +833,11 @@ async function syncTransaction(tx, userId) {
     entity_id:   String(tx.id),
     details:     isBankMatchLink
       ? `Linked to existing QBO ${qboObjectType} #${qboId} (bank match — no new object created)`
-      : `Synced to QBO as ${qboObjectType} #${qboId}`,
+      : isSaleWithFee
+        ? `Synced to QBO as SalesReceipt #${qboId} + Purchase #${feeQboId} (fee)`
+        : isSplitSale
+          ? `Synced to QBO as JournalEntry #${qboId} + JournalEntry #${feeQboId} (fee)`
+          : `Synced to QBO as ${qboObjectType} #${qboId}`,
     created_at:  new Date(), updated_at: new Date(),
   });
 
@@ -603,19 +853,35 @@ async function rollbackTransaction(tx, userId) {
 
   const meta = parseMeta(tx);
 
-  // Detect whether this sync was a BankMatchLink (we updated an existing object's
-  // note) vs a created object.  If it was a link, we must NOT delete the QBO object
-  // — it belongs to the user's bank account and predates our sync.
+  // Bank match link — don't delete the QBO object; it predates our sync.
   const isBankMatchLink = !!(
     meta.bank_match?.qbo_id &&
     meta.bank_match.qbo_id === tx.qbo_object_id
   );
 
+  // Compound sync: fee object stored in metadata.
+  // fee_qbo_type tells us whether it's a Purchase (SaleWithFee) or JE (SplitSale).
+  const hasFeeObject   = !isBankMatchLink && !!meta.fee_qbo_id;
+  const feeObjectType  = meta.fee_qbo_type || 'JournalEntry'; // default to JE for legacy SplitSale
+
   const rollbackAction = isBankMatchLink ? 'unlink' : 'delete';
 
   if (!isBankMatchLink) {
-    // We created this object — delete it from QBO.
     try {
+      // Delete companion fee object first (created second, safer to remove first).
+      if (hasFeeObject) {
+        // Re-fetch live SyncToken — may have changed if QBO modified the entry.
+        let feeSyncToken = meta.fee_qbo_sync_token;
+        try {
+          const feeObj = await qbo.getObject(feeObjectType, meta.fee_qbo_id);
+          if (feeObj?.SyncToken) feeSyncToken = feeObj.SyncToken;
+        } catch {
+          logger.warn(`Rollback: could not fetch ${feeObjectType} #${meta.fee_qbo_id} — using stored SyncToken`);
+        }
+        await qbo.deleteObject(feeObjectType, meta.fee_qbo_id, feeSyncToken);
+      }
+
+      // Delete the primary QBO object.
       await qbo.deleteObject(tx.qbo_object_type, tx.qbo_object_id, tx.qbo_sync_token);
     } catch (err) {
       await db('rollback_logs').insert({
@@ -632,7 +898,6 @@ async function rollbackTransaction(tx, userId) {
       throw err;
     }
   } else {
-    // Linked match — log that we're unlinking (leaving the QBO object intact).
     logger.info('Rollback: bank match link — resetting local state only, QBO object preserved', {
       qbo_type: tx.qbo_object_type,
       qbo_id:   tx.qbo_object_id,
@@ -650,12 +915,19 @@ async function rollbackTransaction(tx, userId) {
     created_at:            new Date(), updated_at: new Date(),
   });
 
+  // Clear fee IDs and sync state from metadata.
+  const cleanedMeta = { ...meta };
+  delete cleanedMeta.fee_qbo_id;
+  delete cleanedMeta.fee_qbo_sync_token;
+  delete cleanedMeta.fee_qbo_type;
+
   await db('normalized_transactions').where({ id: tx.id }).update({
     status:          'approved',
     qbo_object_id:   null,
     qbo_object_type: null,
     qbo_sync_token:  null,
-    sync_error:      null,   // clear so the row shows clean after rollback
+    qbo_metadata:    JSON.stringify(cleanedMeta),
+    sync_error:      null,
     updated_at:      new Date(),
   });
 
@@ -665,8 +937,10 @@ async function rollbackTransaction(tx, userId) {
     entity_type: 'transaction',
     entity_id:   String(tx.id),
     details:     isBankMatchLink
-      ? `Unlinked from QBO ${tx.qbo_object_type} #${tx.qbo_object_id} (QBO object preserved — not deleted)`
-      : `Rolled back QBO ${tx.qbo_object_type} #${tx.qbo_object_id}`,
+      ? `Unlinked from QBO ${tx.qbo_object_type} #${tx.qbo_object_id} (QBO object preserved)`
+      : hasFeeObject
+        ? `Rolled back QBO ${tx.qbo_object_type} #${tx.qbo_object_id} + ${feeObjectType} #${meta.fee_qbo_id} (fee)`
+        : `Rolled back QBO ${tx.qbo_object_type} #${tx.qbo_object_id}`,
     created_at:  new Date(), updated_at: new Date(),
   });
 }

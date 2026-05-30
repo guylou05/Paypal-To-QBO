@@ -13,6 +13,7 @@ import SyncToQBO           from './pages/SyncToQBO';
 import Reports             from './pages/Reports';
 import Logs                from './pages/Logs';
 import Settings            from './pages/Settings';
+import Account             from './pages/Account';
 
 function AppRoutes() {
   return (
@@ -31,6 +32,7 @@ function AppRoutes() {
               <Route path="/reports"   element={<Reports />} />
               <Route path="/logs"      element={<Logs />} />
               <Route path="/settings"  element={<Settings />} />
+              <Route path="/account"   element={<Account />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

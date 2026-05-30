@@ -2,7 +2,7 @@
  * Transaction classifier.
  *
  * Applies rules in priority order:
- *  1. Custom DB rules (admin-defined)
+ *  1. Custom DB rules (admin-defined, support up to 3 conditions with AND/OR)
  *  2. Built-in rules
  *  3. Fallback → unknown → needs_review
  */
@@ -12,32 +12,59 @@ const { RULES } = require('./rules');
 const { deriveTransactionType } = require('../paypal/normalizer');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-function testCustomRule(rule, tx) {
-  const rawValue = (() => {
-    switch (rule.match_field) {
-      case 'description': return tx.description || '';
-      case 'event_code':  return tx.event_code  || '';
-      case 'payer_name':  return tx.payer_name  || '';
-      case 'payer_email': return tx.payer_email || '';
-      case 'funding_source': return tx.funding_source || '';
-      default: return '';
-    }
-  })();
+
+/** Test a single match condition against a transaction. */
+function testOneCondition(cond, tx) {
+  const rawValue = ({
+    description:    tx.description    || '',
+    event_code:     tx.event_code     || '',
+    payer_name:     tx.payer_name     || '',
+    payer_email:    tx.payer_email    || '',
+    funding_source: tx.funding_source || '',
+  })[cond.match_field] || '';
 
   const val = rawValue.toLowerCase();
-  const pat = (rule.match_value || '').toLowerCase();
+  const pat = (cond.match_value || '').toLowerCase();
 
-  switch (rule.match_type) {
+  switch (cond.match_type) {
     case 'contains':    return val.includes(pat);
     case 'equals':      return val === pat;
     case 'starts_with': return val.startsWith(pat);
     case 'ends_with':   return val.endsWith(pat);
     case 'regex': {
-      try { return new RegExp(rule.match_value, 'i').test(rawValue); }
+      try { return new RegExp(cond.match_value, 'i').test(rawValue); }
       catch { return false; }
     }
     default: return false;
   }
+}
+
+/**
+ * Test a custom DB rule against a transaction.
+ *
+ * Supports the new multi-condition format (rule.conditions array) with AND/OR
+ * logic, and falls back to the legacy single-condition columns for older rows
+ * that haven't been migrated yet.
+ */
+function testCustomRule(rule, tx) {
+  // Parse conditions — Postgres may return JSONB as a string or already-parsed object.
+  const conditions = rule.conditions
+    ? (typeof rule.conditions === 'string' ? JSON.parse(rule.conditions) : rule.conditions)
+    : null;
+
+  if (Array.isArray(conditions) && conditions.length > 0) {
+    const op = (rule.conditions_operator || 'and').toLowerCase();
+    return op === 'or'
+      ? conditions.some(c  => testOneCondition(c, tx))
+      : conditions.every(c => testOneCondition(c, tx));
+  }
+
+  // Legacy fallback: single-condition columns.
+  return testOneCondition({
+    match_field: rule.match_field,
+    match_type:  rule.match_type,
+    match_value: rule.match_value,
+  }, tx);
 }
 
 async function loadCustomRules() {
@@ -106,8 +133,6 @@ async function classifyBatch(transactionIds) {
     }
 
     // Refine transaction_type now that we have the category.
-    // deriveTransactionType prefers event_code but falls back to category,
-    // so calling it again with the newly-known category gives the best result.
     const transactionType = deriveTransactionType(tx.event_code, tx.description, result.category, tx.gross_amount);
 
     await db('normalized_transactions').where({ id: tx.id }).update({

@@ -4,6 +4,7 @@ const config    = require('./config');
 const db        = require('./db/knex');
 const logger    = require('./utils/logger');
 const { initScheduler } = require('./services/scheduler');
+const { startWorker }   = require('./services/syncWorker');
 
 async function start() {
   // Verify DB connection
@@ -21,6 +22,9 @@ async function start() {
 
   // Start auto-import scheduler (reads enabled/cron from DB settings).
   await initScheduler();
+
+  // Start server-side sync worker (processes sync_jobs queue).
+  startWorker();
 }
 
 process.on('unhandledRejection', (err) => {

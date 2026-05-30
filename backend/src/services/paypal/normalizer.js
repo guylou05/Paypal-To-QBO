@@ -98,6 +98,7 @@ function deriveTransactionType(eventCode, description, category, grossAmount) {
   }
 
   // ── 5. Category-based fallbacks (no event code or unrecognised prefix) ─
+  if (category === 'funding_detail')         return 'Other';  // internal split-funding bookkeeping
   if (category === 'sale')                   return desc.includes('invoice') ? 'Invoice' : 'Payment';
   if (category === 'refund')                 return 'Refund';
   if (category === 'paypal_credit_purchase') return 'Purchase';
@@ -141,27 +142,30 @@ function normalize(raw) {
   const instrumentSubType = ti.instrument_sub_type || '';
 
   return {
-    paypal_transaction_id:    ti.transaction_id,
-    transaction_date:         date ? date.toISOString().slice(0, 10) : null,
-    transaction_datetime:     date ? date.toISOString() : null,
-    payer_name:               name.full_name || name.alternate_full_name || null,
-    payer_email:              pi.email_address || null,
-    description:              description.slice(0, 1000),
-    event_code:               ti.transaction_event_code   || null,
-    status_code:              ti.transaction_status       || null,
-    gross_amount:             gross,
-    fee_amount:               Math.abs(fee),  // store as positive; direction implied by raw sign
-    net_amount:               net,
-    currency:                 (ti.transaction_amount && ti.transaction_amount.currency_code) || 'USD',
-    instrument_type:          instrumentType,
-    instrument_sub_type:      instrumentSubType,
-    funding_source:           deriveFundingSource(ti, instrumentType, instrumentSubType),
+    paypal_transaction_id:         ti.transaction_id,
+    transaction_date:              date ? date.toISOString().slice(0, 10) : null,
+    transaction_datetime:          date ? date.toISOString() : null,
+    payer_name:                    name.full_name || name.alternate_full_name || null,
+    payer_email:                   pi.email_address || null,
+    description:                   description.slice(0, 1000),
+    event_code:                    ti.transaction_event_code   || null,
+    status_code:                   ti.transaction_status       || null,
+    gross_amount:                  gross,
+    fee_amount:                    Math.abs(fee),  // store as positive; direction implied by raw sign
+    net_amount:                    net,
+    currency:                      (ti.transaction_amount && ti.transaction_amount.currency_code) || 'USD',
+    instrument_type:               instrumentType,
+    instrument_sub_type:           instrumentSubType,
+    funding_source:                deriveFundingSource(ti, instrumentType, instrumentSubType),
+    // Links this record to its parent transaction (set by PayPal for split-funded
+    // payments and refunds). Used post-import to detect funding-detail sub-transactions.
+    related_paypal_transaction_id: ti.related_transaction_id || null,
     // Derive type from event_code + gross sign (category=null at this stage;
     // the classifier will refine it once the category is known).
-    transaction_type:         deriveTransactionType(ti.transaction_event_code, description, null, gross),
-    status:                   'imported',
-    category:                 null,
-    confidence:               null,
+    transaction_type:              deriveTransactionType(ti.transaction_event_code, description, null, gross),
+    status:                        'imported',
+    category:                      null,
+    confidence:                    null,
   };
 }
 

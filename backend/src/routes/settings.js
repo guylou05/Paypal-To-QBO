@@ -21,6 +21,9 @@ router.get('/', async (req, res) => {
   return res.json(safe);
 });
 
+const MATCH_FIELD_VALUES = ['description', 'event_code', 'payer_name', 'payer_email', 'funding_source'];
+const MATCH_TYPE_VALUES  = ['contains', 'equals', 'starts_with', 'ends_with', 'regex'];
+
 // GET /api/settings/classification-rules
 router.get('/classification-rules', async (req, res) => {
   const rules = await db('classification_rules').orderBy('priority');
@@ -30,24 +33,43 @@ router.get('/classification-rules', async (req, res) => {
 // POST /api/settings/classification-rules
 router.post('/classification-rules',
   body('name').notEmpty(),
-  body('match_field').isIn(['description', 'event_code', 'payer_name', 'payer_email', 'funding_source']),
-  body('match_type').isIn(['contains', 'equals', 'starts_with', 'ends_with', 'regex']),
-  body('match_value').notEmpty(),
+  // New multi-condition format
+  body('conditions').optional().isArray({ min: 1, max: 3 }),
+  body('conditions.*.match_field').if(body('conditions').exists()).isIn(MATCH_FIELD_VALUES),
+  body('conditions.*.match_type').if(body('conditions').exists()).isIn(MATCH_TYPE_VALUES),
+  body('conditions.*.match_value').if(body('conditions').exists()).notEmpty(),
+  body('conditions_operator').optional().isIn(['and', 'or']),
+  // Legacy single-condition fallback (required when conditions not provided)
+  body('match_field').if(body('conditions').not().exists()).isIn(MATCH_FIELD_VALUES),
+  body('match_type').if(body('conditions').not().exists()).isIn(MATCH_TYPE_VALUES),
+  body('match_value').if(body('conditions').not().exists()).notEmpty(),
   body('category').notEmpty(),
   handleValidation,
   async (req, res) => {
+    const {
+      name, conditions, conditions_operator,
+      match_field, match_type, match_value,
+      category, qbo_account_key, confidence, priority,
+    } = req.body;
+
+    // Normalise to conditions array; keep legacy columns from first condition.
+    const conditionsData = conditions || [{ match_field, match_type, match_value }];
+    const primary = conditionsData[0];
+
     // Knex 3 + PG: .returning() yields [{id:N}], not [N]
     const rows = await db('classification_rules').insert({
-      name:          req.body.name,
-      match_field:   req.body.match_field,
-      match_type:    req.body.match_type,
-      match_value:   req.body.match_value,
-      category:      req.body.category,
-      qbo_account_key: req.body.qbo_account_key || null,
-      confidence:    req.body.confidence || 'high',
-      priority:      req.body.priority   || 50,
-      is_active:     true,
-      created_at:    new Date(), updated_at: new Date(),
+      name,
+      match_field:         primary.match_field,
+      match_type:          primary.match_type,
+      match_value:         primary.match_value,
+      conditions:          JSON.stringify(conditionsData),
+      conditions_operator: conditions_operator || 'and',
+      category,
+      qbo_account_key:     qbo_account_key || null,
+      confidence:          confidence || 'high',
+      priority:            priority   || 50,
+      is_active:           true,
+      created_at:          new Date(), updated_at: new Date(),
     }).returning('id');
     const id = rows[0].id;
 
@@ -58,14 +80,30 @@ router.post('/classification-rules',
 
 // PUT /api/settings/classification-rules/:id
 router.put('/classification-rules/:id', async (req, res) => {
-  const allowed = ['name', 'match_field', 'match_type', 'match_value', 'category',
-                   'qbo_account_key', 'confidence', 'priority', 'is_active'];
+  const allowed = [
+    'name', 'match_field', 'match_type', 'match_value', 'category',
+    'qbo_account_key', 'confidence', 'priority', 'is_active',
+    'conditions', 'conditions_operator',
+  ];
   const updates = {};
   for (const k of allowed) {
     if (req.body[k] !== undefined) updates[k] = req.body[k];
   }
-  updates.updated_at = new Date();
 
+  // If conditions array provided, serialise it and sync the legacy columns.
+  if (updates.conditions) {
+    const conds = Array.isArray(updates.conditions)
+      ? updates.conditions
+      : JSON.parse(updates.conditions);
+    updates.conditions = JSON.stringify(conds);
+    if (conds.length > 0) {
+      updates.match_field = conds[0].match_field;
+      updates.match_type  = conds[0].match_type;
+      updates.match_value = conds[0].match_value;
+    }
+  }
+
+  updates.updated_at = new Date();
   await db('classification_rules').where({ id: req.params.id }).update(updates);
   const rule = await db('classification_rules').where({ id: req.params.id }).first();
   return res.json(rule);
@@ -78,66 +116,83 @@ router.delete('/classification-rules/:id', async (req, res) => {
 });
 
 // POST /api/settings/classification-rules/test
-// Dry-run a rule definition against existing transactions and return a preview
-// of how many would match and a sample of affected rows.
-// Body: { match_field, match_type, match_value, category }
+// Dry-run conditions against existing transactions — returns match count + sample.
+// Body: { conditions:[{match_field,match_type,match_value}], conditions_operator, category }
+//    OR legacy: { match_field, match_type, match_value, category }
 router.post('/classification-rules/test',
-  body('match_field').isIn(['description', 'event_code', 'payer_name', 'payer_email', 'funding_source']),
-  body('match_type').isIn(['contains', 'equals', 'starts_with', 'ends_with', 'regex']),
-  body('match_value').notEmpty(),
+  body('conditions').optional().isArray({ min: 1, max: 3 }),
+  body('conditions.*.match_field').if(body('conditions').exists()).isIn(MATCH_FIELD_VALUES),
+  body('conditions.*.match_type').if(body('conditions').exists()).isIn(MATCH_TYPE_VALUES),
+  body('conditions.*.match_value').if(body('conditions').exists()).notEmpty(),
+  body('conditions_operator').optional().isIn(['and', 'or']),
+  body('match_field').if(body('conditions').not().exists()).isIn(MATCH_FIELD_VALUES),
+  body('match_type').if(body('conditions').not().exists()).isIn(MATCH_TYPE_VALUES),
+  body('match_value').if(body('conditions').not().exists()).notEmpty(),
   body('category').optional().isString(),
   handleValidation,
   async (req, res) => {
-    const { match_field, match_type, match_value, category } = req.body;
+    const {
+      conditions, conditions_operator = 'and',
+      match_field, match_type, match_value,
+      category,
+    } = req.body;
 
-    // Validate regex before running
-    if (match_type === 'regex') {
-      try { new RegExp(match_value); }
-      catch (e) { return res.status(400).json({ error: `Invalid regex: ${e.message}` }); }
+    const conditionsData = conditions || [{ match_field, match_type, match_value }];
+
+    // Validate any regex conditions before scanning.
+    for (const cond of conditionsData) {
+      if (cond.match_type === 'regex') {
+        try { new RegExp(cond.match_value); }
+        catch (e) { return res.status(400).json({ error: `Invalid regex: ${e.message}` }); }
+      }
     }
 
-    // Pull all transactions (not ignored/noise) — we test against a reasonable set
+    // Pull transactions (not ignored) — cap at 5000 for performance.
     const txs = await db('normalized_transactions')
       .whereNotIn('status', ['ignored'])
       .select('id', 'paypal_transaction_id', 'description', 'event_code',
               'payer_name', 'payer_email', 'funding_source',
               'category', 'override_category', 'transaction_type', 'gross_amount',
               'transaction_date')
-      .limit(5000); // cap for performance
+      .limit(5000);
 
-    // Apply the same matching logic as classifier/index.js testCustomRule
-    function testRule(tx) {
+    function testOneCondition(cond, tx) {
       const raw = ({
         description:    tx.description    || '',
         event_code:     tx.event_code     || '',
         payer_name:     tx.payer_name     || '',
         payer_email:    tx.payer_email    || '',
         funding_source: tx.funding_source || '',
-      })[match_field] || '';
-
+      })[cond.match_field] || '';
       const val = raw.toLowerCase();
-      const pat = match_value.toLowerCase();
-
-      switch (match_type) {
+      const pat = cond.match_value.toLowerCase();
+      switch (cond.match_type) {
         case 'contains':    return val.includes(pat);
         case 'equals':      return val === pat;
         case 'starts_with': return val.startsWith(pat);
         case 'ends_with':   return val.endsWith(pat);
-        case 'regex':       try { return new RegExp(match_value, 'i').test(raw); } catch { return false; }
+        case 'regex':       try { return new RegExp(cond.match_value, 'i').test(raw); } catch { return false; }
         default:            return false;
       }
     }
 
+    function testRule(tx) {
+      const op = (conditions_operator || 'and').toLowerCase();
+      return op === 'or'
+        ? conditionsData.some(c  => testOneCondition(c, tx))
+        : conditionsData.every(c => testOneCondition(c, tx));
+    }
+
     const matches = txs.filter(testRule);
     const sample  = matches.slice(0, 10).map(tx => ({
-      id:                   tx.id,
-      paypal_transaction_id:tx.paypal_transaction_id,
-      date:                 tx.transaction_date,
-      description:          tx.description,
-      payer_name:           tx.payer_name,
-      current_category:     tx.override_category || tx.category,
-      new_category:         category || null,
-      gross_amount:         tx.gross_amount,
+      id:                    tx.id,
+      paypal_transaction_id: tx.paypal_transaction_id,
+      date:                  tx.transaction_date,
+      description:           tx.description,
+      payer_name:            tx.payer_name,
+      current_category:      tx.override_category || tx.category,
+      new_category:          category || null,
+      gross_amount:          tx.gross_amount,
     }));
 
     return res.json({

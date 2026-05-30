@@ -5,15 +5,15 @@ import { paypalApi, qboApi } from '../api/client';
 // Core PayPal ↔ QBO account mappings
 const CORE_MAPPINGS = {
   paypal_bank:        { label: 'PayPal Balance Account',        hint: 'Bank / asset account in QBO that represents your PayPal balance (the clearing account)' },
-  paypal_credit:      { label: 'PayPal Credit Card Account',    hint: 'Credit card liability account for PayPal Credit / BML purchases' },
+  paypal_credit:      { label: 'PayPal Credit Card Account',    hint: 'Credit card liability account for PayPal Credit / BML purchases — NEVER use PayPal Bank here' },
   paypal_fees:        { label: 'PayPal Fees Expense Account',   hint: 'Expense account for PayPal transaction and processing fees' },
-  paypal_sales:       { label: 'PayPal Sales Income Account',   hint: 'Default income account for PayPal sales (overridable per transaction)' },
+  paypal_sales:       { label: 'PayPal Sales Income Account',   hint: 'Default income account for PayPal sales (used by JournalEntry fallback; SalesReceipts use the Item below)' },
   paypal_adjustments: { label: 'PayPal Adjustments / COGS',    hint: 'Used for adjustments and cost-of-goods entries' },
   uncategorized:      { label: 'Uncategorized / Review Account',hint: 'Holding account for transactions that need manual classification' },
 };
 
 // Bank accounts physically connected to PayPal (for bank transfer matching)
-const BANK_MAPPING_KEYS = ['bank_account_1', 'bank_account_2', 'bank_account_3'];
+const BANK_MAPPING_KEYS   = ['bank_account_1', 'bank_account_2', 'bank_account_3'];
 const BANK_MAPPING_LABELS = {
   bank_account_1: 'Connected Bank Account 1',
   bank_account_2: 'Connected Bank Account 2',
@@ -32,6 +32,45 @@ function Step({ number, title, active, done }) {
   );
 }
 
+// ── Minimal search+select for items and customers ──────────────────────────
+
+function EntityPicker({ label, hint, items, value, onChange, getKey, getLabel, emptyLabel, badge }) {
+  const [filter, setFilter] = useState('');
+  const filtered = filter
+    ? items.filter(i => getLabel(i).toLowerCase().includes(filter.toLowerCase()))
+    : items;
+  return (
+    <div className="bg-gray-800/40 border border-gray-700/40 rounded-xl p-4">
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <label className="label mb-0">{label}</label>
+            {badge && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-900/50 text-blue-300 border border-blue-800/50">
+                {badge}
+              </span>
+            )}
+          </div>
+          {hint && <p className="text-xs text-gray-500 mt-0.5">{hint}</p>}
+        </div>
+        {value && <span className="text-xs text-emerald-400 ml-3 shrink-0">✓ Mapped</span>}
+      </div>
+      <input
+        className="input text-xs py-1.5 mb-1"
+        placeholder="Type to filter…"
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+      />
+      <select className="input" value={value} onChange={e => onChange(e.target.value)}>
+        <option value="">{emptyLabel || '— Select —'}</option>
+        {filtered.map(item => (
+          <option key={getKey(item)} value={getKey(item)}>{getLabel(item)}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export default function SetupWizard() {
   const [searchParams] = useSearchParams();
   const [step,         setStep]         = useState(1);
@@ -42,13 +81,17 @@ export default function SetupWizard() {
   const [qboStatus,    setQboStatus]    = useState(null);
   const [qboLoading,   setQboLoading]   = useState(false);
   const [accounts,     setAccounts]     = useState([]);
+  const [customers,    setCustomers]    = useState([]);
+  const [items,        setItems]        = useState([]);
   const [mappings,     setMappings]     = useState({});
   const [saveLoading,  setSaveLoading]  = useState(false);
   const [message,      setMessage]      = useState('');
   const [error,        setError]        = useState('');
 
+  // Load QBO data lazily when step 3 is shown
+  const [qboDataLoaded, setQboDataLoaded] = useState(false);
+
   useEffect(() => {
-    // Check current connection status
     paypalApi.status().then(r => setPpStatus(r.data)).catch(() => {});
     qboApi.status().then(r => setQboStatus(r.data)).catch(() => {});
     qboApi.getMappings().then(r => {
@@ -57,7 +100,6 @@ export default function SetupWizard() {
       setMappings(m);
     }).catch(() => {});
 
-    // Handle QBO callback redirect
     if (searchParams.get('qbo_connected')) {
       setMessage('QuickBooks connected successfully!');
       qboApi.status().then(r => setQboStatus(r.data)).catch(() => {});
@@ -97,12 +139,20 @@ export default function SetupWizard() {
     }
   };
 
-  const handleLoadAccounts = async () => {
+  const handleLoadQBOData = async () => {
+    setError('');
     try {
-      const r = await qboApi.accounts();
-      setAccounts(r.data);
+      const [acctRes, custRes, itemRes] = await Promise.all([
+        qboApi.accounts(),
+        qboApi.customers(),
+        qboApi.items(),
+      ]);
+      setAccounts(acctRes.data);
+      setCustomers(custRes.data);
+      setItems(itemRes.data);
+      setQboDataLoaded(true);
     } catch (err) {
-      setError('Failed to load accounts: ' + (err.response?.data?.error || err.message));
+      setError('Failed to load QBO data: ' + (err.response?.data?.error || err.message));
     }
   };
 
@@ -110,16 +160,40 @@ export default function SetupWizard() {
     setSaveLoading(true);
     setError('');
     try {
-      const mappingsArr = Object.entries(mappings).map(([mapping_key, qbo_account_id]) => {
-        const acc = accounts.find(a => a.Id === qbo_account_id);
-        return {
-          mapping_key,
-          qbo_account_id:   qbo_account_id || null,
-          qbo_account_name: acc ? acc.Name : null,
-          qbo_account_type: acc ? acc.AccountType : null,
-        };
+      // Build mappings array for account-type mappings
+      const accountMappings = Object.entries(mappings)
+        .filter(([key]) => !['paypal_sales_item', 'paypal_default_customer'].includes(key))
+        .map(([mapping_key, qbo_account_id]) => {
+          const acc = accounts.find(a => a.Id === qbo_account_id);
+          return {
+            mapping_key,
+            qbo_account_id:   qbo_account_id || null,
+            qbo_account_name: acc ? acc.Name : null,
+            qbo_account_type: acc ? acc.AccountType : null,
+          };
+        });
+
+      // Sales item mapping
+      const itemId   = mappings['paypal_sales_item'] || null;
+      const itemObj  = items.find(i => i.Id === itemId);
+      accountMappings.push({
+        mapping_key:      'paypal_sales_item',
+        qbo_account_id:   itemId,
+        qbo_account_name: itemObj ? itemObj.Name : null,
+        qbo_account_type: 'Item',
       });
-      await qboApi.saveMappings(mappingsArr);
+
+      // Default customer mapping
+      const custId  = mappings['paypal_default_customer'] || null;
+      const custObj = customers.find(c => c.Id === custId);
+      accountMappings.push({
+        mapping_key:      'paypal_default_customer',
+        qbo_account_id:   custId,
+        qbo_account_name: custObj ? custObj.DisplayName : null,
+        qbo_account_type: 'Customer',
+      });
+
+      await qboApi.saveMappings(accountMappings);
       setMessage('Account mappings saved!');
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save mappings');
@@ -128,8 +202,24 @@ export default function SetupWizard() {
     }
   };
 
+  // Derived lists filtered by account type
+  const bankAndAssetAccounts = accounts.filter(a => ['Bank', 'Other Current Asset'].includes(a.AccountType));
+  const expenseAccounts      = accounts.filter(a => ['Expense', 'Cost of Goods Sold', 'Other Expense'].includes(a.AccountType));
+  const incomeAccounts       = accounts.filter(a => ['Income', 'Other Income'].includes(a.AccountType));
+  const liabilityAccounts    = accounts.filter(a => ['Credit Card', 'Other Current Liability', 'Long Term Liability'].includes(a.AccountType));
+
+  const accountsByMappingKey = (key) => {
+    if (key === 'paypal_bank')        return bankAndAssetAccounts;
+    if (key === 'paypal_credit')      return [...liabilityAccounts, ...bankAndAssetAccounts]; // Credit Card type
+    if (key === 'paypal_fees')        return expenseAccounts;
+    if (key === 'paypal_sales')       return incomeAccounts;
+    if (key === 'paypal_adjustments') return [...incomeAccounts, ...expenseAccounts];
+    if (key === 'uncategorized')      return accounts;
+    return accounts;
+  };
+
   return (
-    <div className="p-8 max-w-3xl">
+    <div className="p-4 sm:p-8 max-w-3xl">
       <h1 className="text-2xl font-bold text-white mb-2">Setup Wizard</h1>
       <p className="text-gray-500 text-sm mb-8">Configure your PayPal and QuickBooks connections</p>
 
@@ -164,9 +254,9 @@ export default function SetupWizard() {
         {!ppStatus?.connected ? (
           <div className="space-y-4">
             <p className="text-sm text-gray-500">
-              Enter your PayPal REST API credentials from
+              Enter your PayPal REST API credentials from{' '}
               <a href="https://developer.paypal.com/developer/applications" target="_blank" rel="noreferrer"
-                 className="text-blue-400 hover:underline ml-1">developer.paypal.com</a>.
+                 className="text-blue-400 hover:underline">developer.paypal.com</a>.
             </p>
             <div>
               <label className="label">Client ID</label>
@@ -187,8 +277,7 @@ export default function SetupWizard() {
           <div className="flex items-center gap-3">
             <div className="w-3 h-3 rounded-full bg-green-400" />
             <span className="text-sm text-gray-400">PayPal API is connected and verified</span>
-            <button className="btn-secondary text-xs ml-auto"
-                    onClick={() => setPpStatus(null)}>
+            <button className="btn-secondary text-xs ml-auto" onClick={() => setPpStatus(null)}>
               Change Credentials
             </button>
           </div>
@@ -208,8 +297,7 @@ export default function SetupWizard() {
             <p className="text-sm text-gray-500">
               Connect your QuickBooks Online company. You will be redirected to Intuit to authorize access.
               Make sure <code className="text-blue-300 text-xs">QBO_CLIENT_ID</code> and
-              <code className="text-blue-300 text-xs ml-1">QBO_CLIENT_SECRET</code> are set in your
-              environment.
+              <code className="text-blue-300 text-xs ml-1">QBO_CLIENT_SECRET</code> are set in your environment.
             </p>
             <button className="btn-primary" onClick={handleQBOConnect} disabled={qboLoading}>
               {qboLoading ? 'Redirecting…' : 'Connect QuickBooks Online'}
@@ -220,15 +308,13 @@ export default function SetupWizard() {
             <div className="flex items-center gap-3">
               <div className="w-3 h-3 rounded-full bg-green-400" />
               <div>
-                <p className="text-sm text-gray-300">
-                  {qboStatus.company?.CompanyName || 'Connected'}
-                </p>
+                <p className="text-sm text-gray-300">{qboStatus.company?.CompanyName || 'Connected'}</p>
                 <p className="text-xs text-gray-500">QuickBooks Online</p>
               </div>
             </div>
             <div className="flex gap-3">
               <button className="btn-secondary text-xs"
-                      onClick={() => { setStep(3); handleLoadAccounts(); }}>
+                      onClick={() => { setStep(3); handleLoadQBOData(); }}>
                 Next: Map Accounts
               </button>
               <button className="btn-danger text-xs"
@@ -245,62 +331,108 @@ export default function SetupWizard() {
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <h2 className="font-semibold text-gray-200">Step 3 — Map QuickBooks Accounts</h2>
-            <button className="btn-secondary text-xs" onClick={handleLoadAccounts}>
-              Refresh Accounts
+            <button className="btn-secondary text-xs" onClick={handleLoadQBOData}>
+              ↺ Refresh
             </button>
           </div>
+
           <p className="text-sm text-gray-500 mb-6">
-            Map each PayPal category to the correct QuickBooks account.
-            All required fields must be mapped before syncing.
+            Map each PayPal category to the correct QuickBooks account, item, and customer.
+            The Sales Item and Default Customer unlock Sales Receipts — without them the
+            syncer creates Journal Entries as a fallback.
           </p>
 
-          {accounts.length === 0 ? (
-            <button className="btn-secondary" onClick={handleLoadAccounts}>
+          {!qboDataLoaded ? (
+            <button className="btn-secondary" onClick={handleLoadQBOData}>
               Load Chart of Accounts
             </button>
           ) : (
-            <div className="space-y-8">
+            <div className="space-y-10">
 
-              {/* ── Core PayPal accounts ─────────────────────────────── */}
+              {/* ── Sales Receipt setup ──────────────────────────────────── */}
+              <div className="space-y-4">
+                <div className="border-b border-gray-800 pb-2">
+                  <h3 className="text-sm font-semibold text-gray-300">Sales Receipt Defaults</h3>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Required to post customer payments as <strong className="text-gray-300">Sales Receipts</strong> and
+                    refunds as <strong className="text-gray-300">Refund Receipts</strong> — the professional bookkeeping
+                    approach. Without both fields the syncer falls back to Journal Entries.
+                  </p>
+                </div>
+
+                {/* Sales Item */}
+                <EntityPicker
+                  label="PayPal Sales Item"
+                  hint="Service/Non-Inventory item in QBO whose income account is your PayPal Sales account. Create one in QBO if needed (e.g. 'PayPal Sales')."
+                  badge="Required for SalesReceipts"
+                  items={items}
+                  value={mappings['paypal_sales_item'] || ''}
+                  onChange={v => setMappings(m => ({ ...m, paypal_sales_item: v }))}
+                  getKey={i => i.Id}
+                  getLabel={i => `${i.Name}${i.IncomeAccountRef?.name ? ` → ${i.IncomeAccountRef.name}` : ''}`}
+                  emptyLabel="— No item selected (JournalEntry fallback) —"
+                />
+
+                {/* Default Customer */}
+                <EntityPicker
+                  label="Default PayPal Customer"
+                  hint="QBO customer used when no specific customer has been matched to a PayPal transaction (e.g. a generic 'PayPal Customer' customer)."
+                  badge="Required for SalesReceipts"
+                  items={customers}
+                  value={mappings['paypal_default_customer'] || ''}
+                  onChange={v => setMappings(m => ({ ...m, paypal_default_customer: v }))}
+                  getKey={c => c.Id}
+                  getLabel={c => c.DisplayName}
+                  emptyLabel="— No default customer (JournalEntry fallback) —"
+                />
+
+                {(!mappings['paypal_sales_item'] || !mappings['paypal_default_customer']) && (
+                  <div className="flex items-start gap-2 px-3 py-2 bg-amber-900/20 border border-amber-800/40 rounded-lg">
+                    <span className="text-amber-400 text-sm mt-0.5">⚠</span>
+                    <p className="text-xs text-amber-300">
+                      Both fields must be filled to enable Sales Receipts. The syncer will
+                      use Journal Entries as a fallback until both are configured.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Core PayPal accounts ──────────────────────────────────── */}
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-gray-300 border-b border-gray-800 pb-2">
                   Core PayPal Accounts
                 </h3>
-                {Object.entries(CORE_MAPPINGS).map(([key, { label, hint }]) => (
-                  <div key={key}>
-                    <label className="label">{label}</label>
-                    <p className="text-xs text-gray-600 mb-1">{hint}</p>
-                    <select
-                      className="input"
-                      value={mappings[key] || ''}
-                      onChange={e => setMappings(m => ({ ...m, [key]: e.target.value }))}
-                    >
-                      <option value="">— Select account —</option>
-                      {accounts.map(a => (
-                        <option key={a.Id} value={a.Id}>{a.Name} ({a.AccountType})</option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
+                {Object.entries(CORE_MAPPINGS).map(([key, { label, hint }]) => {
+                  const filteredAccounts = accountsByMappingKey(key);
+                  return (
+                    <div key={key}>
+                      <label className="label">{label}</label>
+                      <p className="text-xs text-gray-600 mb-1">{hint}</p>
+                      <select
+                        className="input"
+                        value={mappings[key] || ''}
+                        onChange={e => setMappings(m => ({ ...m, [key]: e.target.value }))}
+                      >
+                        <option value="">— Select account —</option>
+                        {filteredAccounts.map(a => (
+                          <option key={a.Id} value={a.Id}>{a.Name} ({a.AccountType})</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })}
               </div>
 
-              {/* ── PayPal-connected bank accounts ───────────────────── */}
+              {/* ── PayPal-connected bank accounts ───────────────────────── */}
               <div className="space-y-4">
                 <div className="border-b border-gray-800 pb-2">
-                  <h3 className="text-sm font-semibold text-gray-300">
-                    PayPal-Connected Bank Accounts
-                  </h3>
+                  <h3 className="text-sm font-semibold text-gray-300">PayPal-Connected Bank Accounts</h3>
                   <p className="text-xs text-gray-500 mt-1">
-                    The physical bank account(s) you transfer money to/from PayPal. Up to 3.
-                    These are used to <strong className="text-gray-400">suggest matching QBO bank transactions</strong> when
-                    you review PayPal bank transfers — eliminating double-entry.
+                    The physical bank accounts you transfer money to/from PayPal. Up to 3.
+                    Used to suggest matching QBO bank transactions when reviewing PayPal transfers.
                   </p>
                 </div>
                 {BANK_MAPPING_KEYS.map(key => {
-                  // Filter to Bank + Other Current Asset accounts only
-                  const bankAccounts = accounts.filter(a =>
-                    ['Bank', 'Other Current Asset'].includes(a.AccountType)
-                  );
                   const slotNum = key.slice(-1);
                   return (
                     <div key={key} className="bg-gray-800/30 border border-gray-700/40 rounded-xl p-4">
@@ -309,9 +441,7 @@ export default function SetupWizard() {
                           {slotNum}
                         </span>
                         <label className="label mb-0">{BANK_MAPPING_LABELS[key]}</label>
-                        {mappings[key] && (
-                          <span className="ml-auto text-xs text-emerald-400">✓ Mapped</span>
-                        )}
+                        {mappings[key] && <span className="ml-auto text-xs text-emerald-400">✓ Mapped</span>}
                       </div>
                       <select
                         className="input"
@@ -319,26 +449,17 @@ export default function SetupWizard() {
                         onChange={e => setMappings(m => ({ ...m, [key]: e.target.value }))}
                       >
                         <option value="">— Not used —</option>
-                        {bankAccounts.map(a => (
+                        {bankAndAssetAccounts.map(a => (
                           <option key={a.Id} value={a.Id}>{a.Name}</option>
                         ))}
                       </select>
-                      {bankAccounts.length === 0 && (
-                        <p className="text-xs text-amber-500 mt-1">
-                          No Bank accounts found in QBO. Add a bank account in QBO first.
-                        </p>
-                      )}
                     </div>
                   );
                 })}
-                <p className="text-xs text-gray-600">
-                  Only Bank and Other Current Asset accounts are shown here.
-                  The more banks you map, the broader the automatic match search.
-                </p>
               </div>
 
               <button className="btn-primary" onClick={handleSaveMappings} disabled={saveLoading}>
-                {saveLoading ? 'Saving…' : 'Save Account Mappings'}
+                {saveLoading ? 'Saving…' : 'Save All Mappings'}
               </button>
             </div>
           )}

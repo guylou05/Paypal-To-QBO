@@ -72,6 +72,36 @@ router.post('/credentials',
   }
 );
 
+// GET /api/paypal/import/check — fast overlap check (no PayPal API call)
+// Returns existing transaction count + overlapping completed batches for the
+// given date range so the UI can warn before committing a redundant import.
+router.get('/import/check',
+  query('startDate').isISO8601(),
+  query('endDate').isISO8601(),
+  handleValidation,
+  async (req, res) => {
+    const { startDate, endDate } = req.query;
+
+    const countRow = await db('normalized_transactions')
+      .whereBetween('transaction_date', [startDate, endDate])
+      .count('id as cnt')
+      .first();
+
+    const overlappingBatches = await db('import_batches')
+      .where('status', 'complete')
+      .where('start_date', '<=', endDate)
+      .where('end_date',   '>=', startDate)
+      .orderBy('created_at', 'desc')
+      .limit(5)
+      .select('id', 'start_date', 'end_date', 'total_new', 'total_fetched', 'created_at');
+
+    return res.json({
+      existingCount:      parseInt(countRow.cnt, 10) || 0,
+      overlappingBatches,
+    });
+  }
+);
+
 // POST /api/paypal/import — pull transactions for a date range
 router.post('/import',
   body('startDate').isISO8601(),

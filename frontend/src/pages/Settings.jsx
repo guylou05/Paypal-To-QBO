@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { settingsApi } from '../api/client';
+import { settingsApi, txApi } from '../api/client';
 
 // ── Classification rules constants ─────────────────────────────────────────
 
@@ -36,9 +36,13 @@ const CATEGORIES = [
 
 const CONFIDENCES = ['high', 'medium', 'low'];
 
+const EMPTY_CONDITION = { match_field: 'description', match_type: 'contains', match_value: '' };
+
 const EMPTY_RULE = {
-  name: '', match_field: 'description', match_type: 'contains',
-  match_value: '', category: 'sale', confidence: 'high', priority: 50, is_active: true,
+  name: '',
+  conditions: [{ ...EMPTY_CONDITION }],
+  conditions_operator: 'and',
+  category: 'sale', confidence: 'high', priority: 50, is_active: true,
 };
 
 function fmt(n) {
@@ -93,6 +97,19 @@ function cronLabel(expr) {
   const parts = expr.trim().split(/\s+/);
   if (parts.length === 5) return `Custom schedule (${expr})`;
   return expr;
+}
+
+// ── Rule conditions summary (used in the rule list row) ───────────────────
+
+function parseConditions(rule) {
+  if (rule.conditions) {
+    const c = typeof rule.conditions === 'string' ? JSON.parse(rule.conditions) : rule.conditions;
+    if (Array.isArray(c) && c.length > 0) return c;
+  }
+  if (rule.match_field) {
+    return [{ match_field: rule.match_field, match_type: rule.match_type, match_value: rule.match_value }];
+  }
+  return [];
 }
 
 // ── Section card ───────────────────────────────────────────────────────────
@@ -211,7 +228,7 @@ export default function Settings() {
   };
 
   return (
-    <div className="p-8 max-w-2xl">
+    <div className="p-4 sm:p-8 max-w-2xl">
       <h1 className="text-2xl font-bold text-white mb-2">Settings</h1>
       <p className="text-gray-500 text-sm mb-8">Application configuration and automation</p>
 
@@ -385,54 +402,218 @@ export default function Settings() {
         </div>
       </Card>
 
+      {/* ── Data Maintenance ──────────────────────────────────────────── */}
+      <DataMaintenance />
+
       {/* ── Classification Rules ──────────────────────────────────────── */}
       <ClassificationRules />
     </div>
   );
 }
 
+// ── Data Maintenance component ─────────────────────────────────────────────
+
+function DataMaintenance() {
+  const [fixStatus, setFixStatus] = useState(null);  // null | 'running' | { fixed, candidates, message }
+  const [fixError,  setFixError]  = useState('');
+
+  const handleFixFunding = async () => {
+    setFixStatus('running');
+    setFixError('');
+    try {
+      const r = await txApi.fixFundingDetails();
+      setFixStatus(r.data);
+    } catch (err) {
+      setFixError(err.response?.data?.error || 'Request failed');
+      setFixStatus(null);
+    }
+  };
+
+  return (
+    <Card icon="🔧" title="Data Maintenance">
+      <p className="text-sm text-gray-400 mb-5">
+        One-time fixes for data that was imported before certain features were added.
+        These operations are safe to run multiple times.
+      </p>
+
+      {/* Fix split-funding details */}
+      <div className="border border-gray-700/50 rounded-lg p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1">
+            <p className="text-sm font-medium text-gray-200 mb-1">
+              Fix Split-Funding Details
+            </p>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              When a PayPal payment is funded by multiple sources (e.g. PayPal Balance
+              + bank transfer), PayPal creates one internal "funding detail" record per
+              source in addition to the main transaction. These internal records are
+              not real transactions and should be hidden from the review queue.
+              Run this once to retroactively mark them as ignored.
+            </p>
+          </div>
+          <button
+            className="btn-secondary text-xs shrink-0"
+            onClick={handleFixFunding}
+            disabled={fixStatus === 'running'}
+          >
+            {fixStatus === 'running' ? '⏳ Running…' : '▶ Run Fix'}
+          </button>
+        </div>
+
+        {/* Result */}
+        {fixStatus && fixStatus !== 'running' && (
+          <div className={`mt-3 px-3 py-2 rounded-lg border text-xs ${
+            fixStatus.fixed > 0
+              ? 'bg-emerald-900/20 border-emerald-800/40 text-emerald-300'
+              : 'bg-gray-800/60 border-gray-700/50 text-gray-400'
+          }`}>
+            {fixStatus.message}
+          </div>
+        )}
+        {fixError && (
+          <p className="mt-2 text-xs text-rose-400">{fixError}</p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 // ── Classification Rules component ─────────────────────────────────────────
 
 function RuleForm({ initial, onSave, onCancel, isSaving, testResult, onTest, testing }) {
-  const [rule, setRule] = useState(initial || EMPTY_RULE);
-  const field = (k, v) => setRule(r => ({ ...r, [k]: v }));
+  // Initialise conditions from the rule — handles both new format and legacy columns.
+  const initConditions = () => {
+    if (initial?.conditions) {
+      const c = typeof initial.conditions === 'string'
+        ? JSON.parse(initial.conditions)
+        : initial.conditions;
+      if (Array.isArray(c) && c.length > 0) return c;
+    }
+    if (initial?.match_field) {
+      return [{ match_field: initial.match_field, match_type: initial.match_type || 'contains', match_value: initial.match_value || '' }];
+    }
+    return [{ ...EMPTY_CONDITION }];
+  };
+
+  const [name,       setName]       = useState(initial?.name       || '');
+  const [priority,   setPriority]   = useState(initial?.priority   || 50);
+  const [category,   setCategory]   = useState(initial?.category   || 'sale');
+  const [confidence, setConfidence] = useState(initial?.confidence || 'high');
+  const [conditions, setConditions] = useState(initConditions);
+  const [operator,   setOperator]   = useState(initial?.conditions_operator || 'and');
+
+  const updateCond = (idx, key, val) =>
+    setConditions(prev => prev.map((c, i) => i === idx ? { ...c, [key]: val } : c));
+
+  const addCond = () => {
+    if (conditions.length < 3)
+      setConditions(prev => [...prev, { ...EMPTY_CONDITION }]);
+  };
+
+  const removeCond = (idx) => {
+    if (conditions.length > 1)
+      setConditions(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const allFilled = conditions.every(c => c.match_value.trim());
+  const canSave   = name.trim() && allFilled;
+
+  const handleSave = () => onSave({
+    id: initial?.id,
+    name, priority, category, confidence,
+    conditions,
+    conditions_operator: operator,
+    // Keep legacy columns in sync (backend also does this, but belt-and-suspenders).
+    match_field: conditions[0].match_field,
+    match_type:  conditions[0].match_type,
+    match_value: conditions[0].match_value,
+  });
+
+  const handleTest = () => onTest({ conditions, conditions_operator: operator, category });
 
   return (
     <div className="bg-gray-800/50 border border-gray-700/60 rounded-xl p-4 space-y-3">
+
       {/* Row 1: name + priority */}
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2">
           <label className="label">Rule Name</label>
-          <input className="input" value={rule.name} placeholder="e.g. Stripe fee"
-                 onChange={e => field('name', e.target.value)} />
+          <input className="input" value={name} placeholder="e.g. Stripe fee"
+                 onChange={e => setName(e.target.value)} />
         </div>
         <div>
           <label className="label">Priority</label>
-          <input className="input" type="number" min="1" max="999" value={rule.priority}
-                 onChange={e => field('priority', parseInt(e.target.value, 10) || 50)} />
+          <input className="input" type="number" min="1" max="999" value={priority}
+                 onChange={e => setPriority(parseInt(e.target.value, 10) || 50)} />
           <p className="text-[10px] text-gray-600 mt-0.5">Lower = runs first</p>
         </div>
       </div>
 
-      {/* Row 2: match condition */}
+      {/* Match conditions */}
       <div>
-        <label className="label">Match Condition</label>
-        <div className="flex items-center gap-2 flex-wrap">
-          <select className="input w-40" value={rule.match_field}
-                  onChange={e => field('match_field', e.target.value)}>
-            {MATCH_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-          </select>
-          <select className="input w-36" value={rule.match_type}
-                  onChange={e => field('match_type', e.target.value)}>
-            {MATCH_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-          </select>
-          <input className="input flex-1 font-mono text-sm" value={rule.match_value}
-                 placeholder={rule.match_type === 'regex' ? '^stripe.*fee' : 'subscription'}
-                 onChange={e => field('match_value', e.target.value)} />
-          <button
-            className="btn-secondary text-xs shrink-0"
-            disabled={!rule.match_value || testing}
-            onClick={() => onTest(rule)}>
+        <div className="flex items-center justify-between mb-2">
+          <label className="label mb-0">Match Conditions</label>
+          {conditions.length < 3 && (
+            <button type="button" onClick={addCond}
+                    className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors">
+              + Add condition
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-0">
+          {conditions.map((cond, idx) => (
+            <div key={idx}>
+              {/* AND / OR divider between conditions */}
+              {idx > 0 && (
+                <div className="flex items-center gap-2 my-2">
+                  <div className="flex-1 border-t border-gray-700/50" />
+                  <button
+                    type="button"
+                    onClick={() => setOperator(op => op === 'and' ? 'or' : 'and')}
+                    title="Click to toggle AND / OR"
+                    className="text-[10px] font-bold px-2.5 py-0.5 rounded-full border transition-colors
+                               bg-gray-700/70 border-gray-600 text-gray-300
+                               hover:border-blue-500 hover:text-blue-300 hover:bg-blue-900/20"
+                  >
+                    {operator.toUpperCase()}
+                  </button>
+                  <div className="flex-1 border-t border-gray-700/50" />
+                </div>
+              )}
+
+              {/* Condition row */}
+              <div className="flex items-center gap-2">
+                <select className="input w-40 shrink-0" value={cond.match_field}
+                        onChange={e => updateCond(idx, 'match_field', e.target.value)}>
+                  {MATCH_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                </select>
+                <select className="input w-36 shrink-0" value={cond.match_type}
+                        onChange={e => updateCond(idx, 'match_type', e.target.value)}>
+                  {MATCH_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+                <input
+                  className="input flex-1 font-mono text-sm"
+                  value={cond.match_value}
+                  placeholder={cond.match_type === 'regex' ? '^stripe.*fee' : 'value…'}
+                  onChange={e => updateCond(idx, 'match_value', e.target.value)}
+                />
+                {conditions.length > 1 && (
+                  <button type="button" onClick={() => removeCond(idx)}
+                          title="Remove condition"
+                          className="text-gray-600 hover:text-rose-400 transition-colors shrink-0 text-base leading-none px-1">
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Test button */}
+        <div className="mt-2.5 flex justify-end">
+          <button type="button" className="btn-secondary text-xs"
+                  disabled={!allFilled || testing} onClick={handleTest}>
             {testing ? '…' : '⚡ Test'}
           </button>
         </div>
@@ -458,8 +639,8 @@ function RuleForm({ initial, onSave, onCancel, isSaving, testResult, onTest, tes
                   <span className="truncate max-w-[200px]">{s.description || s.payer_name || '—'}</span>
                   <span className="font-mono text-gray-500">{fmt(s.gross_amount)}</span>
                   <span className="text-gray-600">{s.current_category}</span>
-                  {rule.category && s.current_category !== rule.category && (
-                    <span className="text-blue-400">→ {rule.category}</span>
+                  {category && s.current_category !== category && (
+                    <span className="text-blue-400">→ {category}</span>
                   )}
                 </div>
               ))}
@@ -472,18 +653,18 @@ function RuleForm({ initial, onSave, onCancel, isSaving, testResult, onTest, tes
       )}
 
       {/* Row 3: result */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label className="label">Classify As</label>
-          <select className="input" value={rule.category}
-                  onChange={e => field('category', e.target.value)}>
+          <select className="input" value={category}
+                  onChange={e => setCategory(e.target.value)}>
             {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
         <div>
           <label className="label">Confidence</label>
-          <select className="input" value={rule.confidence}
-                  onChange={e => field('confidence', e.target.value)}>
+          <select className="input" value={confidence}
+                  onChange={e => setConfidence(e.target.value)}>
             {CONFIDENCES.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
@@ -491,8 +672,8 @@ function RuleForm({ initial, onSave, onCancel, isSaving, testResult, onTest, tes
 
       {/* Buttons */}
       <div className="flex items-center gap-2 pt-1">
-        <button className="btn-primary text-xs" disabled={!rule.name || !rule.match_value || isSaving}
-                onClick={() => onSave(rule)}>
+        <button className="btn-primary text-xs" disabled={!canSave || isSaving}
+                onClick={handleSave}>
           {isSaving ? 'Saving…' : initial?.id ? 'Update Rule' : 'Create Rule'}
         </button>
         <button className="btn-secondary text-xs" onClick={onCancel}>Cancel</button>
@@ -523,15 +704,14 @@ function ClassificationRules() {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleTest = async (rule) => {
+  const handleTest = async (ruleData) => {
     setTesting(true);
     setTestResult(null);
     try {
       const r = await settingsApi.testRule({
-        match_field: rule.match_field,
-        match_type:  rule.match_type,
-        match_value: rule.match_value,
-        category:    rule.category,
+        conditions:          ruleData.conditions,
+        conditions_operator: ruleData.conditions_operator,
+        category:            ruleData.category,
       });
       setTestResult(r.data);
     } catch (err) {
@@ -628,13 +808,22 @@ function ClassificationRules() {
                   {/* Rule description */}
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-medium text-gray-300 truncate">{rule.name}</p>
-                    <p className="text-[10px] text-gray-500 mt-0.5">
-                      <span className="text-gray-400">{rule.match_field}</span>
-                      {' '}<span className="text-gray-600">{rule.match_type}</span>{' '}
-                      <span className="font-mono text-blue-400">"{rule.match_value}"</span>
-                      {' → '}
+                    <p className="text-[10px] text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-1">
+                      {parseConditions(rule).map((c, i) => (
+                        <span key={i} className="flex items-center gap-x-1">
+                          {i > 0 && (
+                            <span className="font-semibold text-gray-600 uppercase text-[9px]">
+                              {rule.conditions_operator || 'and'}
+                            </span>
+                          )}
+                          <span className="text-gray-400">{c.match_field}</span>
+                          <span className="text-gray-600">{c.match_type}</span>
+                          <span className="font-mono text-blue-400">"{c.match_value}"</span>
+                        </span>
+                      ))}
+                      <span className="text-gray-600">→</span>
                       <span className="text-emerald-400">{rule.category}</span>
-                      <span className="text-gray-600 ml-1">({rule.confidence})</span>
+                      <span className="text-gray-600">({rule.confidence})</span>
                     </p>
                   </div>
 

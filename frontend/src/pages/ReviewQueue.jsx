@@ -3,6 +3,7 @@ import { txApi, paypalApi, qboApi } from '../api/client';
 import StatusBadge from '../components/StatusBadge';
 import EditModal from '../components/EditModal';
 import BulkEditModal from '../components/BulkEditModal';
+import { buildQboUrl } from '../utils/qboUrl';
 
 const CATEGORIES = [
   // Income
@@ -15,8 +16,8 @@ const CATEGORIES = [
   'bank_transfer_in', 'bank_transfer_out',
   // Reversals & adjustments
   'refund', 'chargeback', 'adjustment', 'currency_conversion',
-  // Other
-  'noise', 'unknown',
+  // Other / internal
+  'noise', 'unknown', 'funding_detail',
 ];
 
 const TRANSACTION_TYPES = [
@@ -81,6 +82,7 @@ export default function ReviewQueue() {
   // QBO data cache — loaded once on first modal open
   const [qboData,        setQboData]        = useState(null);
   const [qboLoading,     setQboLoading]     = useState(false);
+  const [qboEnvironment, setQboEnvironment] = useState('production');
 
   // Sorting
   const [sortBy,         setSortBy]         = useState('transaction_date');
@@ -99,6 +101,7 @@ export default function ReviewQueue() {
   const [statusCounts,   setStatusCounts]   = useState({});
   const [confirmRollback,setConfirmRollback]= useState(null); // tx to rollback
   const [bulkEditOpen,   setBulkEditOpen]   = useState(false);
+  const [filtersOpen,    setFiltersOpen]    = useState(false); // mobile filter panel toggle
 
   // Fetch PayPal sandbox flag + status counts once (and after mutations)
   const loadSummary = useCallback(async () => {
@@ -114,6 +117,9 @@ export default function ReviewQueue() {
     paypalApi.status()
       .then(r => setIsSandbox(r.data.sandbox !== false))
       .catch(() => setIsSandbox(true));
+    qboApi.status()
+      .then(r => setQboEnvironment(r.data.environment || 'production'))
+      .catch(() => {});
     loadSummary();
   }, [loadSummary]);
 
@@ -318,15 +324,15 @@ export default function ReviewQueue() {
   };
 
   return (
-    <div className="p-8 space-y-5">
+    <div className="p-4 sm:p-8 space-y-4 sm:space-y-5">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold text-white">Review Queue</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-white">Review Queue</h1>
           <p className="text-gray-500 text-sm mt-1">{total} transaction(s) matching filter</p>
         </div>
         <div className="flex gap-2 flex-wrap justify-end">
-          <button className="btn-secondary text-xs" onClick={recomputeTypes}
+          <button className="btn-secondary text-xs hidden sm:inline-flex" onClick={recomputeTypes}
                   disabled={actionLoading}
                   title="Re-run transaction type logic on all existing records">
             ⟳ Recompute Types
@@ -351,11 +357,11 @@ export default function ReviewQueue() {
           </div>
           <button className="btn-success text-xs" onClick={bulkApprove}
                   disabled={!selected.size || actionLoading}>
-            Approve Selected ({selected.size})
+            ✓ Approve{selected.size > 0 ? ` (${selected.size})` : ''}
           </button>
           <button className="btn-secondary text-xs" onClick={bulkIgnore}
                   disabled={!selected.size || actionLoading}>
-            Ignore Selected ({selected.size})
+            Ignore{selected.size > 0 ? ` (${selected.size})` : ''}
           </button>
         </div>
       </div>
@@ -395,56 +401,187 @@ export default function ReviewQueue() {
         </div>
       )}
 
-      {/* Filters */}
-      <div className="card p-4 space-y-3">
-        <div className="flex gap-3 flex-wrap items-end">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Transaction Type</label>
-            <select className="input w-44" value={typeFilter}
-                    onChange={e => { setTypeFilter(e.target.value); resetPage(); }}>
-              <option value="">All types</option>
-              {TRANSACTION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
+      {/* Filters — collapsible on mobile */}
+      <div className="card p-3 sm:p-4 space-y-3">
+        {/* Mobile: filter toggle header */}
+        <div className="flex items-center justify-between sm:hidden">
+          <button
+            className="flex items-center gap-2 text-sm font-medium text-gray-300"
+            onClick={() => setFiltersOpen(o => !o)}
+          >
+            <span>{filtersOpen ? '▲' : '▼'}</span>
+            <span>Filters{hasActiveFilters ? ' ●' : ''}</span>
+          </button>
+          <div className="flex gap-2 items-center">
+            {hasActiveFilters && (
+              <button className="text-xs text-blue-400 hover:text-blue-300" onClick={clearFilters}>
+                Clear
+              </button>
+            )}
+            {/* Search always visible on mobile */}
+            <input
+              className="input text-xs w-40"
+              placeholder="Search…"
+              value={search}
+              onChange={e => { setSearch(e.target.value); resetPage(); }}
+            />
           </div>
+        </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Category</label>
-            <select className="input w-52" value={categoryFilter}
-                    onChange={e => { setCategoryFilter(e.target.value); resetPage(); }}>
-              <option value="">All categories</option>
-              {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+        {/* Filter grid — always open on sm+, toggled on mobile */}
+        <div className={`${filtersOpen ? 'block' : 'hidden'} sm:block`}>
+          <div className="flex gap-3 flex-wrap items-end">
+            <div className="flex flex-col gap-1 w-full sm:w-auto">
+              <label className="text-xs text-gray-500">Transaction Type</label>
+              <select className="input sm:w-44" value={typeFilter}
+                      onChange={e => { setTypeFilter(e.target.value); resetPage(); }}>
+                <option value="">All types</option>
+                {TRANSACTION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1 w-full sm:w-auto">
+              <label className="text-xs text-gray-500">Category</label>
+              <select className="input sm:w-52" value={categoryFilter}
+                      onChange={e => { setCategoryFilter(e.target.value); resetPage(); }}>
+                <option value="">All categories</option>
+                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1 w-full sm:w-auto">
+              <label className="text-xs text-gray-500">From date</label>
+              <input type="date" className="input sm:w-40" value={startDate}
+                     onChange={e => { setStartDate(e.target.value); resetPage(); }} />
+            </div>
+
+            <div className="flex flex-col gap-1 w-full sm:w-auto">
+              <label className="text-xs text-gray-500">To date</label>
+              <input type="date" className="input sm:w-40" value={endDate}
+                     onChange={e => { setEndDate(e.target.value); resetPage(); }} />
+            </div>
+
+            <div className="hidden sm:flex flex-col gap-1 flex-1 min-w-[200px]">
+              <label className="text-xs text-gray-500">Search</label>
+              <input className="input" placeholder="Name, email, ID, description…"
+                     value={search}
+                     onChange={e => { setSearch(e.target.value); resetPage(); }} />
+            </div>
+
+            {hasActiveFilters && (
+              <button className="btn-secondary text-xs self-end hidden sm:inline-flex" onClick={clearFilters}>
+                Clear filters
+              </button>
+            )}
           </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">From date</label>
-            <input type="date" className="input w-40" value={startDate}
-                   onChange={e => { setStartDate(e.target.value); resetPage(); }} />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">To date</label>
-            <input type="date" className="input w-40" value={endDate}
-                   onChange={e => { setEndDate(e.target.value); resetPage(); }} />
-          </div>
-
-          <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
-            <label className="text-xs text-gray-500">Search</label>
-            <input className="input" placeholder="Name, email, ID, description…"
-                   value={search}
-                   onChange={e => { setSearch(e.target.value); resetPage(); }} />
-          </div>
-
-          {hasActiveFilters && (
-            <button className="btn-secondary text-xs self-end" onClick={clearFilters}>
-              Clear filters
-            </button>
-          )}
         </div>
       </div>
 
-      {/* Table */}
-      <div className="card p-0 overflow-x-auto">
+      {/* ── Mobile card list (hidden on md+) ─────────────────────────────── */}
+      <div className="md:hidden space-y-2">
+        {loading ? (
+          <div className="card py-8 text-center text-gray-500 text-sm">Loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="card py-8 text-center text-gray-500 text-sm">No transactions match the current filter.</div>
+        ) : rows.map(tx => (
+          <div
+            key={tx.id}
+            className={`card p-3 cursor-pointer transition-colors active:bg-gray-800
+              ${selected.has(tx.id) ? 'border-blue-700 bg-blue-900/10' : ''}`}
+            onClick={() => openEdit(tx)}
+          >
+            {/* Top row: checkbox + date + status */}
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                <input type="checkbox" className="rounded"
+                       checked={selected.has(tx.id)}
+                       onChange={() => toggleSelect(tx.id)} />
+                <span className="text-xs text-gray-500">{tx.transaction_date}</span>
+              </div>
+              <StatusBadge value={tx.status} />
+            </div>
+
+            {/* Second row: type + amount */}
+            <div className="flex items-center justify-between mb-1.5">
+              <TypeBadge value={tx.transaction_type} />
+              <span className={`font-mono text-sm font-semibold ${parseFloat(tx.gross_amount) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {fmt(tx.gross_amount)}
+              </span>
+            </div>
+
+            {/* Payer */}
+            <div className="mb-1">
+              <p className="text-sm text-gray-300">{tx.payer_name || '—'}</p>
+              {tx.payer_email && <p className="text-xs text-gray-600">{tx.payer_email}</p>}
+            </div>
+
+            {/* Description + category */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500 truncate max-w-[55%]" title={tx.description}>
+                {tx.description || tx.event_code || '—'}
+              </p>
+              <StatusBadge value={tx.override_category || tx.category} type="category" />
+            </div>
+
+            {/* Sync error */}
+            {tx.status === 'failed' && tx.sync_error && (
+              <p className="text-[11px] text-rose-400 mt-1.5 leading-tight line-clamp-2">
+                {tx.sync_error}
+              </p>
+            )}
+
+            {/* Actions row */}
+            <div className="flex gap-3 mt-2.5 pt-2.5 border-t border-gray-800" onClick={e => e.stopPropagation()}>
+              <button className="text-xs text-blue-400 hover:text-blue-300 font-medium"
+                      onClick={() => openEdit(tx)}>
+                {tx.status === 'synced' ? 'View' : 'Edit'}
+              </button>
+              {tx.status === 'synced' && tx.qbo_object_id && buildQboUrl(tx.qbo_object_type, tx.qbo_object_id, qboEnvironment) && (
+                <a href={buildQboUrl(tx.qbo_object_type, tx.qbo_object_id, qboEnvironment)}
+                   target="_blank" rel="noopener noreferrer"
+                   className="text-xs text-emerald-400 hover:text-emerald-300">
+                  ↗ QBO
+                </a>
+              )}
+              {tx.status === 'synced' && (
+                <button className="text-xs text-amber-400 hover:text-amber-300 font-medium"
+                        onClick={() => setConfirmRollback(tx)} disabled={actionLoading}>
+                  ↩ Rollback
+                </button>
+              )}
+              {tx.status === 'failed' && (
+                <button
+                  className="text-xs text-rose-400 hover:text-rose-300 font-medium"
+                  disabled={actionLoading}
+                  onClick={async () => {
+                    setActionLoading(true);
+                    try {
+                      await txApi.update(tx.id, { status: 'approved' });
+                      await txApi.sync(tx.id);
+                      setMessage(`Re-synced ${tx.paypal_transaction_id}`);
+                    } catch (err) {
+                      setMessage('Retry failed: ' + (err.response?.data?.error || err.message));
+                    } finally { setActionLoading(false); load(); loadSummary(); }
+                  }}>
+                  ↺ Retry
+                </button>
+              )}
+              {tx.status !== 'approved' && tx.status !== 'synced' && tx.status !== 'failed' && (
+                <button className="text-xs text-green-400 hover:text-green-300"
+                        onClick={async () => {
+                          await txApi.update(tx.id, { status: 'approved' });
+                          load(); loadSummary();
+                        }}>
+                  Approve
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Desktop table (hidden on mobile) ──────────────────────────────── */}
+      <div className="hidden md:block card p-0 overflow-x-auto">
         {loading ? (
           <div className="p-8 text-center text-gray-500">Loading…</div>
         ) : rows.length === 0 ? (
@@ -480,7 +617,6 @@ export default function ReviewQueue() {
                   className={`table-tr cursor-pointer hover:bg-blue-900/20 transition-colors ${selected.has(tx.id) ? 'bg-blue-900/10' : ''}`}
                   onClick={() => openEdit(tx)}
                 >
-                  {/* Checkbox — stop propagation so click doesn't open modal */}
                   <td className="table-td" onClick={e => e.stopPropagation()}>
                     <input type="checkbox" className="rounded"
                            checked={selected.has(tx.id)}
@@ -534,21 +670,29 @@ export default function ReviewQueue() {
                     )}
                   </td>
 
-                  {/* QBO ID column — only when Synced filter is active */}
                   {statusFilter === 'synced' && (
                     <td className="table-td" onClick={e => e.stopPropagation()}>
-                      {tx.qbo_object_id ? (
-                        <div>
-                          <p className="font-mono text-xs text-emerald-400">{tx.qbo_object_id}</p>
-                          <p className="text-xs text-gray-600">{tx.qbo_object_type}</p>
-                        </div>
-                      ) : (
+                      {tx.qbo_object_id ? (() => {
+                        const url = buildQboUrl(tx.qbo_object_type, tx.qbo_object_id, qboEnvironment);
+                        return (
+                          <div>
+                            <p className="text-[10px] text-gray-600 mb-0.5">{tx.qbo_object_type}</p>
+                            {url ? (
+                              <a href={url} target="_blank" rel="noopener noreferrer"
+                                 className="font-mono text-xs text-emerald-400 hover:text-emerald-300 underline underline-offset-2 transition-colors">
+                                {tx.qbo_object_id} ↗
+                              </a>
+                            ) : (
+                              <p className="font-mono text-xs text-emerald-400">{tx.qbo_object_id}</p>
+                            )}
+                          </div>
+                        );
+                      })() : (
                         <span className="text-xs text-gray-600">—</span>
                       )}
                     </td>
                   )}
 
-                  {/* Sync Error column — only when Failed filter is active */}
                   {statusFilter === 'failed' && (
                     <td className="table-td max-w-[240px]" onClick={e => e.stopPropagation()}>
                       {tx.sync_error ? (
@@ -561,18 +705,23 @@ export default function ReviewQueue() {
                     </td>
                   )}
 
-                  {/* Actions — stop propagation */}
                   <td className="table-td" onClick={e => e.stopPropagation()}>
                     <div className="flex gap-1 items-center flex-wrap">
                       <button className="text-xs text-blue-400 hover:text-blue-300"
                               onClick={() => openEdit(tx)}>
                         {tx.status === 'synced' ? 'View' : 'Edit'}
                       </button>
+                      {tx.status === 'synced' && tx.qbo_object_id && buildQboUrl(tx.qbo_object_type, tx.qbo_object_id, qboEnvironment) && (
+                        <a href={buildQboUrl(tx.qbo_object_type, tx.qbo_object_id, qboEnvironment)}
+                           target="_blank" rel="noopener noreferrer"
+                           className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors"
+                           title={`Open ${tx.qbo_object_type} in QuickBooks`}>
+                          ↗ QBO
+                        </a>
+                      )}
                       {tx.status === 'synced' && (
-                        <button
-                          className="text-xs text-amber-400 hover:text-amber-300 font-medium"
-                          onClick={() => setConfirmRollback(tx)}
-                          disabled={actionLoading}>
+                        <button className="text-xs text-amber-400 hover:text-amber-300 font-medium"
+                                onClick={() => setConfirmRollback(tx)} disabled={actionLoading}>
                           ↩ Rollback
                         </button>
                       )}
@@ -583,7 +732,6 @@ export default function ReviewQueue() {
                           onClick={async () => {
                             setActionLoading(true);
                             try {
-                              // Re-approve then re-sync
                               await txApi.update(tx.id, { status: 'approved' });
                               await txApi.sync(tx.id);
                               setMessage(`Re-synced ${tx.paypal_transaction_id}`);
@@ -634,6 +782,7 @@ export default function ReviewQueue() {
           isSandbox={isSandbox}
           qboData={qboData}
           qboLoading={qboLoading}
+          qboEnvironment={qboEnvironment}
           onClose={() => setEditTx(null)}
           onSave={() => { setEditTx(null); load(); loadSummary(); }}
           onRollback={(tx) => { setEditTx(null); setConfirmRollback(tx); }}

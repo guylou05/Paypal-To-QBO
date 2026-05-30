@@ -9,11 +9,12 @@
  *   5. Income / Expense Account  — category account (direction-aware, filtered by type)
  *   6. Bank Account              — destination for transfers/payouts
  *   7. Class + Memo              — optional QBO class tracking and memo
- *   8. Accounting Preview        — live DR/CR journal entry
+ *   8. Accounting Preview        — live QBO object preview (SalesReceipt / Expense / Transfer / RefundReceipt / JE)
  *   9. Status + Notes            — reviewer controls
  */
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { txApi, qboApi } from '../api/client';
+import { buildQboUrl } from '../utils/qboUrl';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -75,13 +76,17 @@ function getDirection(txType, overrideCategory, txCategory, gross) {
   if (['bank_transfer_in', 'bank_transfer_out', 'paypal_credit_repayment'].includes(cat)) return 'transfer';
   if (type === 'Transfer' || type === 'Bank Payout') return 'transfer';
 
-  // Fixed-direction expense categories
+  // Transaction type wins for well-known income types with positive gross.
+  // Prevents a mis-classified category (e.g. 'purchase') from flipping a real
+  // customer Payment or Invoice into the expense direction.
+  if ((type === 'Payment' || type === 'Invoice') && g >= 0) return 'income';
+
+  // Category-based direction (for all other type/category combos)
   if (['paypal_fee', 'international_fee', 'payout', 'purchase', 'paypal_credit_purchase'].includes(cat)) return 'expense';
   if (type === 'Purchase') return 'expense';
 
-  // Fixed-direction income categories
   if (['sale', 'subscription', 'donation_received'].includes(cat)) return 'income';
-  if (type === 'Payment' || type === 'Invoice') return 'income';
+  if (type === 'Payment' || type === 'Invoice') return 'income';  // covers negative gross edge-case
 
   // Direction depends on gross sign for these bi-directional categories
   if (['refund', 'chargeback', 'adjustment', 'currency_conversion'].includes(cat)) {
@@ -112,7 +117,21 @@ function sortByName(arr, getName) {
 
 // ── SearchSelect ───────────────────────────────────────────────────────────
 
-function SearchSelect({ items, value, onChange, emptyLabel, placeholder, getKey, getLabel, loading, disabled }) {
+/**
+ * SearchSelect — filterable select with optional inline "Create in QBO" button.
+ *
+ * Extra props vs. plain select:
+ *   onCreateNew(name) — called when user clicks "Create in QBO"; receives the
+ *                       current filter text as the proposed display name.
+ *   creating          — shows a spinner on the create button while the API call
+ *                       is in flight (set by the parent).
+ *   createLabel       — button text prefix, defaults to "Create".
+ */
+function SearchSelect({
+  items, value, onChange, emptyLabel, placeholder,
+  getKey, getLabel, loading, disabled,
+  onCreateNew, creating, createLabel,
+}) {
   const [filter, setFilter] = useState('');
 
   const filtered = useMemo(() => {
@@ -120,6 +139,8 @@ function SearchSelect({ items, value, onChange, emptyLabel, placeholder, getKey,
     const f = filter.toLowerCase();
     return items.filter(i => getLabel(i).toLowerCase().includes(f));
   }, [items, filter, getLabel]);
+
+  const showCreate = onCreateNew && filter.trim().length > 1 && filtered.length === 0 && !loading;
 
   return (
     <div className="space-y-1">
@@ -143,6 +164,20 @@ function SearchSelect({ items, value, onChange, emptyLabel, placeholder, getKey,
           </option>
         ))}
       </select>
+      {showCreate && (
+        <button
+          type="button"
+          className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors mt-0.5"
+          disabled={creating || disabled}
+          onClick={() => onCreateNew(filter.trim())}
+        >
+          {creating
+            ? <span className="animate-spin inline-block w-3 h-3 border border-blue-500 border-t-transparent rounded-full" />
+            : <span>＋</span>
+          }
+          {creating ? 'Creating…' : `${createLabel || 'Create'} "${filter.trim()}" in QBO`}
+        </button>
+      )}
     </div>
   );
 }
@@ -182,104 +217,303 @@ function DirectionBadge({ direction }) {
 
 // ── Accounting Preview ─────────────────────────────────────────────────────
 
-function AccountingPreview({ direction, tx, meta }) {
+// Pill badge for QBO object type label in the preview
+function QboTypePill({ label, color }) {
+  const colors = {
+    green:  'text-emerald-300 bg-emerald-900/30 border-emerald-700/40',
+    red:    'text-rose-300    bg-rose-900/30    border-rose-700/40',
+    amber:  'text-amber-300   bg-amber-900/30   border-amber-700/40',
+    violet: 'text-violet-300  bg-violet-900/30  border-violet-700/40',
+    gray:   'text-gray-400    bg-gray-800/60    border-gray-600/40',
+  };
+  return (
+    <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${colors[color] || colors.gray}`}>
+      {label}
+    </span>
+  );
+}
+
+// Compact key-value table used inside each object block
+function PreviewRow({ label, value, valueClass, mono }) {
+  return (
+    <div className="flex justify-between items-baseline gap-2">
+      <span className="text-gray-500 shrink-0">{label}</span>
+      <span className={`text-right truncate max-w-[60%] ${mono ? 'font-mono' : ''} ${valueClass || 'text-gray-300'}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+// Small "Open in QBO" link shown on each object block when the tx is synced
+function QboLink({ objectType, objectId, environment }) {
+  if (!objectType || !objectId) return null;
+  const url = buildQboUrl(objectType, objectId, environment);
+  if (!url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-0.5 text-[10px] text-emerald-400 hover:text-emerald-300 underline underline-offset-2 transition-colors shrink-0"
+      onClick={e => e.stopPropagation()}
+    >
+      ↗ Open in QBO
+    </a>
+  );
+}
+
+// Block header row: pill + subtitle on the left, optional QBO link on the right
+function BlockHeader({ pill, pillColor, subtitle, qboType, qboId, environment, isSynced }) {
+  return (
+    <div className="flex items-center justify-between gap-2 mb-2">
+      <div className="flex items-center gap-2 min-w-0">
+        <QboTypePill label={pill} color={pillColor} />
+        {subtitle && <span className="text-[10px] text-gray-500 truncate">{subtitle}</span>}
+      </div>
+      {isSynced && <QboLink objectType={qboType} objectId={qboId} environment={environment} />}
+    </div>
+  );
+}
+
+function AccountingPreview({ direction, tx, meta,
+  isSynced, qboEnvironment,
+  primaryQboId, primaryQboType,
+  feeQboId, feeQboType }) {
+
   const gross = Math.abs(parseFloat(tx.gross_amount || 0));
   const fee   = Math.abs(parseFloat(tx.fee_amount   || 0));
-  const net   = gross - fee;
 
-  const paypalAccLabel = meta.paypal_account_name || 'PayPal Clearing Account';
-  const bankAccLabel   = meta.bank_account_name   || 'Bank Account (mapped)';
-  const incomeLabel    = meta.income_account_name  || 'PayPal Sales (mapped)';
-  const expenseLabel   = meta.expense_account_name || 'Expense Account (mapped)';
-  const entityNote     = meta.customer_name
-    ? `Customer: ${meta.customer_name}`
-    : meta.vendor_name
-    ? `Vendor: ${meta.vendor_name}`
-    : null;
-  const classNote      = meta.class_name ? ` · ${meta.class_name}` : '';
-  const note           = [entityNote, classNote || null].filter(Boolean).join('') || null;
+  const paypalAccLabel    = meta.paypal_account_name  || 'PayPal Bank (mapped)';
+  const paypalCreditLabel = 'PayPal Credit (mapped)';
+  const bankAccLabel      = meta.bank_account_name    || 'Bank Account (mapped)';
+  const feeAccLabel       = 'PayPal Fees (mapped)';
+  const expenseLabel      = meta.expense_account_name || 'Expense Account (mapped)';
+  const salesItemLabel    = 'PayPal Sales Item (mapped)';
+  const customerLabel     = meta.customer_name || 'PayPal Customer (default)';
 
-  let entries = [];
+  const cat = (tx.override_category || tx.category || '').toLowerCase();
 
-  if (direction === 'income') {
-    // Money in: DR PayPal clearing, DR PayPal Fees, CR Income
-    entries = [
-      { side: 'DR', account: paypalAccLabel, amount: net,  note: null },
-      ...(fee > 0 ? [{ side: 'DR', account: 'PayPal Fees (mapped)', amount: fee, note: null }] : []),
-      { side: 'CR', account: incomeLabel,    amount: gross, note },
-    ];
-  } else if (direction === 'expense') {
-    const isRefundReceived = parseFloat(tx.gross_amount || 0) >= 0 &&
-      (tx.transaction_type === 'Refund' || (tx.override_category || tx.category) === 'refund');
-    if (isRefundReceived) {
-      entries = [
-        { side: 'DR', account: paypalAccLabel, amount: gross, note: null },
-        { side: 'CR', account: expenseLabel,   amount: gross, note },
-      ];
-    } else {
-      entries = [
-        { side: 'DR', account: expenseLabel,   amount: gross, note },
-        { side: 'CR', account: paypalAccLabel, amount: gross, note: null },
-      ];
+  // ── Transfer ─────────────────────────────────────────────────────────────
+  if (direction === 'transfer') {
+    if (cat === 'paypal_credit_repayment') {
+      return (
+        <div className="space-y-2">
+          <BlockHeader
+            pill="Transfer" pillColor="violet"
+            subtitle="Liability reduction — no P&L impact"
+            qboType={primaryQboType} qboId={primaryQboId}
+            environment={qboEnvironment} isSynced={isSynced}
+          />
+          <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+            <PreviewRow label="Amount"   value={fmt(gross)}         valueClass="text-gray-200" mono />
+            <PreviewRow label="From"     value={paypalAccLabel} />
+            <PreviewRow label="To"       value={paypalCreditLabel}  valueClass="text-amber-300" />
+          </div>
+          <p className="text-[10px] text-gray-600 pt-1 border-t border-gray-800">
+            Reduces PayPal Credit balance — never affects P&amp;L.
+          </p>
+        </div>
+      );
     }
-  } else {
-    // Transfer
-    const cat  = tx.override_category || tx.category || '';
+
     const isIn = cat === 'bank_transfer_in';
     return (
-      <div className="space-y-2 text-sm">
-        <div className="flex justify-between">
-          <span className="text-gray-500">Amount</span>
-          <span className="font-mono text-gray-200">{fmt(Math.abs(tx.gross_amount))}</span>
+      <div className="space-y-2">
+        <BlockHeader
+          pill="Transfer" pillColor="violet"
+          subtitle="No P&L impact"
+          qboType={primaryQboType} qboId={primaryQboId}
+          environment={qboEnvironment} isSynced={isSynced}
+        />
+        <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+          <PreviewRow label="Amount" value={fmt(gross)} valueClass="text-gray-200" mono />
+          <PreviewRow label="From"   value={isIn ? bankAccLabel : paypalAccLabel} />
+          <PreviewRow label="To"     value={isIn ? paypalAccLabel : bankAccLabel} />
         </div>
-        <div className="flex justify-between">
-          <span className="text-gray-500">From</span>
-          <span className="text-gray-300 text-xs">{isIn ? bankAccLabel : paypalAccLabel}</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-gray-500">To</span>
-          <span className="text-gray-300 text-xs">{isIn ? paypalAccLabel : bankAccLabel}</span>
-        </div>
-        <p className="text-gray-600 text-xs pt-1 border-t border-gray-800">
-          Posted as a QBO Transfer between the two accounts above.
+        <p className="text-[10px] text-gray-600 pt-1 border-t border-gray-800">
+          Posted as a QBO Transfer between the two accounts.
         </p>
       </div>
     );
   }
 
-  return (
-    <table className="w-full text-xs">
-      <thead>
-        <tr className="border-b border-gray-700/50">
-          <th className="pb-1.5 text-left text-gray-600 w-10">DR/CR</th>
-          <th className="pb-1.5 text-left text-gray-600">Account</th>
-          <th className="pb-1.5 text-right text-gray-600 w-24">Amount</th>
-        </tr>
-      </thead>
-      <tbody>
-        {entries.map((e, i) => (
-          <tr key={i} className={i < entries.length - 1 ? 'border-b border-gray-800/40' : ''}>
-            <td className={`py-1.5 font-mono font-bold text-sm ${e.side === 'DR' ? 'text-blue-400' : 'text-emerald-400'}`}>
-              {e.side}
-            </td>
-            <td className="py-1.5 pl-2">
-              <p className="text-gray-300">{e.account}</p>
-              {e.note && <p className="text-gray-500 text-[10px] mt-0.5">{e.note}</p>}
-            </td>
-            <td className="py-1.5 text-right font-mono text-gray-300">
-              {fmt(e.amount)}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+  // ── Income ────────────────────────────────────────────────────────────────
+  if (direction === 'income') {
+    // Refund received / chargeback won → vendor credit → JournalEntry
+    if (cat === 'refund' || cat === 'chargeback') {
+      const net = gross - fee;
+      return (
+        <div className="space-y-2">
+          <BlockHeader
+            pill="Journal Entry" pillColor="gray"
+            subtitle="Vendor credit / chargeback recovery"
+            qboType={primaryQboType} qboId={primaryQboId}
+            environment={qboEnvironment} isSynced={isSynced}
+          />
+          <table className="w-full text-xs">
+            <thead><tr className="border-b border-gray-700/50">
+              <th className="pb-1 text-left text-gray-600 w-10">DR/CR</th>
+              <th className="pb-1 text-left text-gray-600">Account</th>
+              <th className="pb-1 text-right text-gray-600 w-24">Amount</th>
+            </tr></thead>
+            <tbody>
+              <tr className="border-b border-gray-800/40">
+                <td className="py-1 font-mono font-bold text-sm text-blue-400">DR</td>
+                <td className="py-1 pl-2 text-gray-300">{paypalAccLabel}</td>
+                <td className="py-1 text-right font-mono text-gray-300">{fmt(fee > 0 ? net : gross)}</td>
+              </tr>
+              {fee > 0 && (
+                <tr className="border-b border-gray-800/40">
+                  <td className="py-1 font-mono font-bold text-sm text-blue-400">DR</td>
+                  <td className="py-1 pl-2 text-gray-300">{feeAccLabel}</td>
+                  <td className="py-1 text-right font-mono text-gray-300">{fmt(fee)}</td>
+                </tr>
+              )}
+              <tr>
+                <td className="py-1 font-mono font-bold text-sm text-emerald-400">CR</td>
+                <td className="py-1 pl-2 text-gray-300">{expenseLabel}</td>
+                <td className="py-1 text-right font-mono text-gray-300">{fmt(gross)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="text-[10px] text-gray-600 pt-1 border-t border-gray-800">
+            Credit applied to expense account — JournalEntry (no SalesReceipt for vendor credits).
+          </p>
+        </div>
+      );
+    }
+
+    // Standard sale / subscription / donation → SalesReceipt + companion Expense for fee
+    return (
+      <div className="space-y-3">
+        {/* ① SalesReceipt */}
+        <div>
+          <BlockHeader
+            pill="Sales Receipt" pillColor="green"
+            subtitle={`Customer: ${customerLabel}`}
+            qboType={primaryQboType} qboId={primaryQboId}
+            environment={qboEnvironment} isSynced={isSynced}
+          />
+          <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+            <PreviewRow label="Item (income)"   value={salesItemLabel} />
+            <PreviewRow label="Gross amount"    value={fmt(gross)}     valueClass="text-emerald-300" mono />
+            <PreviewRow label="Deposit to"      value={paypalAccLabel} />
+          </div>
+        </div>
+
+        {/* ② Companion Expense for fee (auto-created by syncer) */}
+        {fee > 0 && (
+          <div>
+            <BlockHeader
+              pill="Expense" pillColor="red"
+              subtitle="PayPal processing fee (auto-created)"
+              qboType={feeQboType} qboId={feeQboId}
+              environment={qboEnvironment} isSynced={isSynced}
+            />
+            <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+              <PreviewRow label="Payment from" value={paypalAccLabel} />
+              <PreviewRow label="Category"     value={feeAccLabel} />
+              <PreviewRow label="Amount"       value={fmt(fee)}    valueClass="text-rose-300" mono />
+            </div>
+          </div>
+        )}
+
+        <p className="text-[10px] text-gray-600 pt-1 border-t border-gray-800">
+          {fee > 0
+            ? `Two QBO objects on sync: SalesReceipt (${fmt(gross)} gross revenue) + Expense (${fmt(fee)} fee).`
+            : 'Posted as a QBO SalesReceipt.'}
+        </p>
+      </div>
+    );
+  }
+
+  // ── Expense ───────────────────────────────────────────────────────────────
+  if (direction === 'expense') {
+    // Refund issued / chargeback lost → RefundReceipt
+    if (cat === 'refund' || cat === 'chargeback') {
+      return (
+        <div className="space-y-2">
+          <BlockHeader
+            pill="Refund Receipt" pillColor="amber"
+            subtitle={`Customer: ${customerLabel}`}
+            qboType={primaryQboType} qboId={primaryQboId}
+            environment={qboEnvironment} isSynced={isSynced}
+          />
+          <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+            <PreviewRow label="Item"        value={salesItemLabel} />
+            <PreviewRow label="Amount"      value={fmt(gross)}     valueClass="text-amber-300" mono />
+            <PreviewRow label="Refund from" value={paypalAccLabel} />
+          </div>
+          <p className="text-[10px] text-gray-600 pt-1 border-t border-gray-800">
+            Posted as a QBO Refund Receipt — reverses revenue.
+          </p>
+        </div>
+      );
+    }
+
+    // PayPal Credit purchase → Expense paid from PayPal Credit (NOT PayPal Bank)
+    const isCreditPurchase = cat === 'paypal_credit_purchase';
+    const paymentSource    = isCreditPurchase ? paypalCreditLabel : paypalAccLabel;
+
+    return (
+      <div className="space-y-2">
+        <BlockHeader
+          pill="Expense" pillColor="red"
+          subtitle={isCreditPurchase ? '⚠ Paid via PayPal Credit' : undefined}
+          qboType={primaryQboType} qboId={primaryQboId}
+          environment={qboEnvironment} isSynced={isSynced}
+        />
+        <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+          <PreviewRow
+            label="Payment from"
+            value={paymentSource}
+            valueClass={isCreditPurchase ? 'text-amber-300' : 'text-gray-300'}
+          />
+          <PreviewRow label="Category" value={expenseLabel} />
+          <PreviewRow label="Amount"   value={fmt(gross)}   valueClass="text-rose-300" mono />
+          {meta.vendor_name && <PreviewRow label="Vendor" value={meta.vendor_name} />}
+        </div>
+        <p className="text-[10px] text-gray-600 pt-1 border-t border-gray-800">
+          {isCreditPurchase
+            ? 'Expense against PayPal Credit liability — PayPal Bank is NOT affected.'
+            : 'Posted as a QBO Expense paid from PayPal Bank.'}
+        </p>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 // ── Matched entity chip ────────────────────────────────────────────────────
 
-function MatchChip({ name }) {
+/**
+ * Shows how the customer was matched:
+ *   source='memory'     → emerald (high confidence — previous reviewer confirmed it)
+ *   source='name_fuzzy' → amber (lower confidence — inferred from payer name)
+ *   source=null         → just name in gray (manual selection, no auto-match label)
+ */
+function MatchChip({ name, source, matchCount }) {
   if (!name) return null;
+
+  if (source === 'memory') {
+    return (
+      <p className="text-xs mt-1.5 flex items-center gap-1.5 text-emerald-400">
+        <span>✦</span>
+        <span>Auto-matched from memory</span>
+        {matchCount > 1 && <span className="text-emerald-600">({matchCount} prior uses)</span>}
+      </p>
+    );
+  }
+  if (source === 'name_fuzzy') {
+    return (
+      <p className="text-xs mt-1.5 flex items-center gap-1.5 text-amber-400">
+        <span>⟳</span>
+        <span>Suggested from payer name</span>
+      </p>
+    );
+  }
   return (
     <p className="text-xs text-emerald-400 mt-1.5 flex items-center gap-1">
       <span className="text-emerald-500">✓</span> {name}
@@ -289,7 +523,7 @@ function MatchChip({ name }) {
 
 // ── Main modal ─────────────────────────────────────────────────────────────
 
-export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose, onSave, onRollback }) {
+export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvironment, onClose, onSave, onRollback }) {
   const existingMeta = tx.qbo_metadata || {};
   const isSynced     = tx.status === 'synced';
 
@@ -313,6 +547,18 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
   const [customerName, setCustomerName] = useState(existingMeta.customer_name || '');
   const [vendorId,     setVendorId]     = useState(existingMeta.vendor_id     || '');
   const [vendorName,   setVendorName]   = useState(existingMeta.vendor_name   || '');
+
+  // ── Customer auto-match memory ────────────────────────────────────────────
+  // source: 'memory' (from payer_customer_matches DB) | 'name_fuzzy' | null
+  const [autoMatch,    setAutoMatch]    = useState(null); // { source, matchCount }
+
+  // ── Vendor / customer auto-create ─────────────────────────────────────────
+  const [vendorCreating,   setVendorCreating]   = useState(false);
+  const [customerCreating, setCustomerCreating] = useState(false);
+  // Local extension lists — new entities created this session are appended here
+  // so they appear immediately without a full QBO data reload.
+  const [extraVendors,   setExtraVendors]   = useState([]);
+  const [extraCustomers, setExtraCustomers] = useState([]);
 
   // ── Account state ─────────────────────────────────────────────────────────
   const [paypalAccountId,   setPaypalAccountId]   = useState(existingMeta.paypal_account_id   || '');
@@ -340,6 +586,8 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
   // Approved match — pulled from existing meta on mount, updated when user picks
   const [approvedMatch,    setApprovedMatch]    = useState(existingMeta.bank_match || null);
 
+  const hasFee = parseFloat(tx.fee_amount || 0) > 0;
+
   // ── Filtered account lists ────────────────────────────────────────────────
   const clearingAccounts = useMemo(() =>
     sortByName((qboData?.accounts || []).filter(a => CLEARING_ACC_TYPES.includes(a.AccountType)),
@@ -362,10 +610,12 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
     [qboData]);
 
   const customers = useMemo(() =>
-    sortByName(qboData?.customers || [], c => c.DisplayName), [qboData]);
+    sortByName([...(qboData?.customers || []), ...extraCustomers], c => c.DisplayName),
+    [qboData, extraCustomers]);
 
   const vendors = useMemo(() =>
-    sortByName(qboData?.vendors || [], v => v.DisplayName), [qboData]);
+    sortByName([...(qboData?.vendors || []), ...extraVendors], v => v.DisplayName),
+    [qboData, extraVendors]);
 
   const classes = useMemo(() =>
     sortByName(qboData?.classes || [], c => c.FullyQualifiedName || c.Name), [qboData]);
@@ -409,14 +659,24 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
       if (match) { setPaypalAccountId(match.Id); setPaypalAccountName(match.Name || match.FullyQualifiedName); }
     }
 
-    // Auto-suggest customer / vendor from payer_name
+    // Customer/vendor suggestion (only when not already set from saved metadata)
     if (!existingMeta.customer_id && !existingMeta.vendor_id) {
       const payer = tx.payer_name || tx.payer_email || '';
-      if (payer && direction === 'income' && customers.length) {
-        const m = customers.find(c => fuzzyMatch(c.DisplayName, payer));
-        if (m) { setCustomerId(m.Id); setCustomerName(m.DisplayName); }
+
+      if (direction === 'income' && customers.length) {
+        // 1. Memory lookup (async, highest priority — fires separately below)
+        // 2. Fuzzy name match as fallback (sync, lower confidence)
+        if (payer && !customerId) {
+          const m = customers.find(c => fuzzyMatch(c.DisplayName, payer));
+          if (m) {
+            setCustomerId(m.Id);
+            setCustomerName(m.DisplayName);
+            setAutoMatch(prev => prev?.source === 'memory' ? prev : { source: 'name_fuzzy', matchCount: 0 });
+          }
+        }
       }
-      if (payer && direction === 'expense' && vendors.length) {
+
+      if (direction === 'expense' && vendors.length && payer) {
         const m = vendors.find(v => fuzzyMatch(v.DisplayName, payer));
         if (m) { setVendorId(m.Id); setVendorName(m.DisplayName); }
       }
@@ -424,16 +684,80 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qboData]);
 
+  // ── Memory-based customer match (fires once after customers list is ready) ──
+  useEffect(() => {
+    // Only relevant for income-direction transactions not already customer-tagged
+    if (existingMeta.customer_id) return;
+    if (!customers.length) return;
+    if (direction !== 'income') return;
+
+    const email = tx.payer_email || '';
+    const name  = tx.payer_name  || '';
+    if (!email && !name) return;
+
+    txApi.customerMatch({ payer_email: email, payer_name: name })
+      .then(r => {
+        const match = r.data.match;
+        if (!match) return;
+
+        // Verify the remembered customer still exists in QBO list
+        const found = customers.find(c => c.Id === match.qbo_customer_id);
+        if (!found) return;
+
+        // Memory match beats fuzzy-name suggestion — always apply it
+        setCustomerId(match.qbo_customer_id);
+        setCustomerName(match.qbo_customer_name || found.DisplayName);
+        setAutoMatch({ source: 'memory', matchCount: match.match_count });
+      })
+      .catch(() => {}); // Non-fatal
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customers]);
+
   // ── Change handlers ───────────────────────────────────────────────────────
   const pickCustomer = useCallback((id) => {
     setCustomerId(id);
     setCustomerName(customers.find(x => x.Id === id)?.DisplayName || '');
+    // Clear auto-match badge on manual override — user is making an explicit choice
+    setAutoMatch(null);
   }, [customers]);
 
   const pickVendor = useCallback((id) => {
     setVendorId(id);
     setVendorName(vendors.find(x => x.Id === id)?.DisplayName || '');
   }, [vendors]);
+
+  // ── Inline QBO entity creation handlers ──────────────────────────────────
+
+  const createVendorInQbo = useCallback(async (name) => {
+    setVendorCreating(true);
+    try {
+      const r = await qboApi.createVendor(name);
+      const newVendor = { Id: r.data.Id, DisplayName: r.data.DisplayName };
+      setExtraVendors(prev => [...prev, newVendor]);
+      setVendorId(newVendor.Id);
+      setVendorName(newVendor.DisplayName);
+    } catch (err) {
+      alert('Failed to create vendor in QBO: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setVendorCreating(false);
+    }
+  }, []);
+
+  const createCustomerInQbo = useCallback(async (name) => {
+    setCustomerCreating(true);
+    try {
+      const r = await qboApi.createCustomer(name);
+      const newCustomer = { Id: r.data.Id, DisplayName: r.data.DisplayName };
+      setExtraCustomers(prev => [...prev, newCustomer]);
+      setCustomerId(newCustomer.Id);
+      setCustomerName(newCustomer.DisplayName);
+      setAutoMatch(null);
+    } catch (err) {
+      alert('Failed to create customer in QBO: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setCustomerCreating(false);
+    }
+  }, []);
 
   const pickPaypalAccount = useCallback((id) => {
     setPaypalAccountId(id);
@@ -530,10 +854,12 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
 
   return (
     <div
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 bg-black/80 flex items-end sm:items-center justify-center z-50 sm:p-4"
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[94vh] flex flex-col shadow-2xl">
+      <div className="bg-gray-900 border border-gray-700 w-full flex flex-col shadow-2xl
+                      rounded-t-2xl max-h-[92vh]
+                      sm:rounded-2xl sm:max-w-2xl sm:max-h-[94vh]">
 
         {/* ── Header bar ───────────────────────────────────────────────── */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
@@ -553,11 +879,27 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
               <span className="text-emerald-400 text-lg shrink-0">✓</span>
               <div className="flex-1 min-w-0">
                 <p className="text-emerald-300 text-sm font-semibold">Synced to QuickBooks</p>
-                {tx.qbo_object_id && (
-                  <p className="text-xs text-emerald-500 mt-0.5">
-                    {tx.qbo_object_type} · <span className="font-mono">{tx.qbo_object_id}</span>
-                  </p>
-                )}
+                {tx.qbo_object_id && (() => {
+                  const qboUrl = buildQboUrl(tx.qbo_object_type, tx.qbo_object_id, qboEnvironment);
+                  return (
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      <span className="text-xs text-emerald-600">
+                        {tx.qbo_object_type} · <span className="font-mono">{tx.qbo_object_id}</span>
+                      </span>
+                      {qboUrl && (
+                        <a
+                          href={qboUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 underline underline-offset-2 transition-colors"
+                          onClick={e => e.stopPropagation()}
+                        >
+                          View in QBO ↗
+                        </a>
+                      )}
+                    </div>
+                  );
+                })()}
                 <p className="text-xs text-gray-500 mt-1">
                   All fields are read-only. Roll back to delete the QBO entry and re-edit.
                 </p>
@@ -665,8 +1007,15 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
                     emptyLabel="— No specific customer —" placeholder="Search customers…"
                     getKey={c => c.Id} getLabel={c => c.DisplayName}
                     loading={qboLoading} disabled={isSynced}
+                    onCreateNew={!isSynced ? createCustomerInQbo : undefined}
+                    creating={customerCreating}
+                    createLabel="Create customer"
                   />
-                  <MatchChip name={customerName} />
+                  <MatchChip
+                    name={customerName}
+                    source={autoMatch?.source}
+                    matchCount={autoMatch?.matchCount}
+                  />
                 </>
               ) : (
                 <>
@@ -675,6 +1024,9 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
                     emptyLabel="— No specific vendor —" placeholder="Search vendors…"
                     getKey={v => v.Id} getLabel={v => v.DisplayName}
                     loading={qboLoading} disabled={isSynced}
+                    onCreateNew={!isSynced ? createVendorInQbo : undefined}
+                    creating={vendorCreating}
+                    createLabel="Create vendor"
                   />
                   <MatchChip name={vendorName} />
                 </>
@@ -710,6 +1062,16 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
                 getKey={a => a.Id} getLabel={a => a.FullyQualifiedName || a.Name}
                 loading={qboLoading} disabled={isSynced}
               />
+
+              {/* Fee note — always automatic in the new SalesReceipt + Expense model */}
+              {hasFee && (
+                <div className="mt-3 pt-3 border-t border-gray-700/40">
+                  <p className="text-[11px] text-gray-500">
+                    ℹ️ A companion <span className="text-gray-400 font-medium">Expense</span> for the {fmt(tx.fee_amount)} PayPal fee
+                    will be created automatically alongside the Sales Receipt.
+                  </p>
+                </div>
+              )}
             </SectionCard>
           )}
 
@@ -918,11 +1280,17 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, onClose,
           </SectionCard>
 
           {/* 8 — Accounting Preview ──────────────────────────────────── */}
-          <SectionCard icon="📊" title="Journal Entry Preview">
+          <SectionCard icon="📊" title="Accounting Preview">
             <AccountingPreview
               direction={direction}
               tx={{ ...tx, transaction_type: txType, override_category: category || tx.override_category }}
               meta={liveMeta}
+              isSynced={isSynced}
+              qboEnvironment={qboEnvironment}
+              primaryQboId={tx.qbo_object_id}
+              primaryQboType={tx.qbo_object_type}
+              feeQboId={existingMeta.fee_qbo_id}
+              feeQboType={existingMeta.fee_qbo_type || 'Purchase'}
             />
           </SectionCard>
 
