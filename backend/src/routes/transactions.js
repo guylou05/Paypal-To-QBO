@@ -617,6 +617,76 @@ router.post('/reclassify-batch', async (req, res) => {
   return res.json({ message: `Reclassified ${ids.length} transactions`, count: ids.length });
 });
 
+// POST /api/transactions/bulk-retry — reset failed→approved and enqueue a new sync batch
+router.post('/bulk-retry',
+  body('ids').isArray({ min: 1 }),
+  handleValidation,
+  async (req, res) => {
+    const { ids } = req.body;
+
+    // Identify which of the given IDs are actually in 'failed' status
+    const failedTxs = await db('normalized_transactions')
+      .whereIn('id', ids)
+      .where('status', 'failed')
+      .select('id', 'paypal_transaction_id');
+
+    if (failedTxs.length === 0) {
+      return res.status(422).json({ error: 'No failed transactions found for the given IDs.' });
+    }
+
+    const failedIds = failedTxs.map(t => t.id);
+
+    // Reset to approved and clear the previous sync error
+    await db('normalized_transactions')
+      .whereIn('id', failedIds)
+      .update({
+        status:      'approved',
+        sync_error:  null,
+        reviewed_by: req.user.id,
+        reviewed_at: new Date(),
+        updated_at:  new Date(),
+      });
+
+    // Create a new sync batch
+    const batchRows = await db('sync_batches').insert({
+      status:         'running',
+      total_jobs:     failedTxs.length,
+      completed_jobs: 0,
+      failed_jobs:    0,
+      created_by:     req.user.id,
+      created_at:     new Date(),
+      updated_at:     new Date(),
+    }).returning('id');
+    const batchId = batchRows[0].id;
+
+    // Enqueue one job per transaction
+    const jobs = failedTxs.map(tx => ({
+      batch_id:              batchId,
+      transaction_id:        tx.id,
+      paypal_transaction_id: tx.paypal_transaction_id,
+      status:                'pending',
+      attempts:              0,
+      max_attempts:          3,
+      created_by:            req.user.id,
+      created_at:            new Date(),
+      updated_at:            new Date(),
+    }));
+    await db('sync_jobs').insert(jobs);
+
+    await db('audit_logs').insert({
+      user_id:     req.user.id,
+      action:      'retry',
+      entity_type: 'transaction',
+      details:     `Bulk retry: reset ${failedTxs.length} failed transaction(s) and enqueued sync batch #${batchId}`,
+      created_at:  new Date(),
+      updated_at:  new Date(),
+    });
+
+    logger.info(`Bulk retry: reset ${failedTxs.length} failed txs → approved, sync batch #${batchId} created`);
+    return res.json({ batchId, total: failedTxs.length, reset: failedTxs.length });
+  }
+);
+
 // POST /api/transactions/fix-funding-details
 // Retroactively detects split-funding detail records that were imported before
 // this feature was added, and marks them ignored.  Safe to run multiple times.

@@ -80,6 +80,7 @@ export const txApi = {
   enqueueSyncBatch: (ids)    => api.post('/transactions/sync-queue', { ids }),
   syncBatchStatus:  (batchId)=> api.get(`/transactions/sync-queue/${batchId}`),
   cancelSyncBatch:  (batchId)=> api.delete(`/transactions/sync-queue/${batchId}`),
+  bulkRetry:        (ids)    => api.post('/transactions/bulk-retry', { ids }),
 };
 
 // ── Settings ───────────────────────────────────────────────────────────────
