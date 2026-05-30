@@ -17,6 +17,38 @@ const logger    = require('../utils/logger');
 // Currently running cron task (null if disabled).
 let currentTask = null;
 
+// ── Proactive QBO token refresh ────────────────────────────────────────────
+// QBO access tokens expire every 60 minutes.  Rather than relying on the
+// reactive refresh (which fires mid-request and can fail on network hiccups),
+// we proactively refresh every 45 minutes so the token is always warm.
+// The refresh token itself lasts ~100 days and is rotated on every refresh.
+
+let tokenRefreshTimer = null;
+const QBO_REFRESH_INTERVAL_MS = 45 * 60 * 1000; // 45 minutes
+
+async function proactiveQboRefresh() {
+  // Lazy-require to avoid circular dependency at module load time.
+  const { getValidAccessToken, getStoredToken } = require('./quickbooks/client');
+  try {
+    const stored = await getStoredToken();
+    if (!stored) return; // QBO not connected yet — nothing to refresh
+    await getValidAccessToken();
+    logger.info('QBO: proactive token refresh OK');
+  } catch (err) {
+    // Log but don't throw — the next interval (or next user request) will retry.
+    logger.warn('QBO: proactive token refresh failed', { error: err.message });
+  }
+}
+
+function initQboTokenRefresh() {
+  if (tokenRefreshTimer) return; // already running
+  // Refresh once on startup (catches a token that nearly expired while server was down)
+  proactiveQboRefresh();
+  // Then repeat every 45 minutes
+  tokenRefreshTimer = setInterval(proactiveQboRefresh, QBO_REFRESH_INTERVAL_MS);
+  logger.info(`QBO: proactive token refresh scheduled every ${QBO_REFRESH_INTERVAL_MS / 60000} min`);
+}
+
 // ── Settings helpers ───────────────────────────────────────────────────────
 
 async function getSetting(key, defaultValue = null) {
@@ -145,4 +177,5 @@ module.exports = {
   initScheduler,
   reconfigureScheduler,
   executeScheduledImport,
+  initQboTokenRefresh,
 };

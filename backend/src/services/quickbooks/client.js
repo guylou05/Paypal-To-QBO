@@ -24,23 +24,30 @@ function makeOAuthClient() {
 
 // ── Token storage helpers ──────────────────────────────────────────────────
 async function saveToken(tokenResponse) {
-  const raw = tokenResponse.token || tokenResponse;
+  const raw      = tokenResponse.token || tokenResponse;
   const existing = await db('oauth_tokens').where({ provider: 'quickbooks' }).first();
 
+  // IMPORTANT: Intuit's refresh response does not always include a new refresh_token.
+  // If it's absent, preserve the existing one — never overwrite with null.
+  const refreshTokenEncrypted = raw.refresh_token
+    ? encrypt(raw.refresh_token)
+    : (existing && existing.refresh_token_encrypted) || null;
+
+  // Same safety for refresh token expiry: only update if the response provides it.
+  const refreshTokenExpiresAt = raw.x_refresh_token_expires_in
+    ? new Date(Date.now() + raw.x_refresh_token_expires_in * 1000)
+    : (existing && existing.refresh_token_expires_at) || null;
+
   const row = {
-    provider:                'quickbooks',
-    realm_id:                raw.realmId || (existing && existing.realm_id),
-    access_token_encrypted:  encrypt(raw.access_token),
-    refresh_token_encrypted: raw.refresh_token ? encrypt(raw.refresh_token) : null,
-    access_token_expires_at: raw.expires_in
+    provider:                 'quickbooks',
+    realm_id:                 raw.realmId || (existing && existing.realm_id),
+    access_token_encrypted:   encrypt(raw.access_token),
+    refresh_token_encrypted:  refreshTokenEncrypted,
+    access_token_expires_at:  raw.expires_in
       ? new Date(Date.now() + raw.expires_in * 1000)
       : null,
-    refresh_token_expires_at: raw.x_refresh_token_expires_in
-      ? new Date(Date.now() + raw.x_refresh_token_expires_in * 1000)
-      : null,
-    token_metadata: JSON.stringify({
-      token_type: raw.token_type,
-    }),
+    refresh_token_expires_at: refreshTokenExpiresAt,
+    token_metadata: JSON.stringify({ token_type: raw.token_type }),
     updated_at: new Date(),
   };
 
@@ -80,15 +87,37 @@ async function getValidAccessToken() {
   const oauthClient = makeOAuthClient();
   oauthClient.setToken({ refresh_token: refreshToken });
 
-  try {
+  // Helper: attempt one refresh call
+  const attemptRefresh = async () => {
     const resp = await oauthClient.refresh();
     const newToken = resp.getJson();
-    newToken.realmId = stored.realm_id; // refresh doesn't return realmId
+    newToken.realmId = stored.realm_id; // refresh response never includes realmId
     await saveToken(newToken);
     return { accessToken: newToken.access_token, realmId: stored.realm_id };
-  } catch (err) {
-    logger.error('QBO token refresh failed', { error: err.message });
-    throw new Error('QuickBooks token refresh failed. Please reconnect.');
+  };
+
+  try {
+    return await attemptRefresh();
+  } catch (firstErr) {
+    // Distinguish permanent failures (revoked/expired token) from transient ones.
+    const msg = (firstErr.message || '').toLowerCase();
+    const permanent = msg.includes('invalid_grant') || msg.includes('unauthorized');
+
+    if (permanent) {
+      logger.error('QBO refresh token revoked or expired — reconnect required', { error: firstErr.message });
+      throw new Error('QuickBooks connection expired. Please reconnect in Setup.');
+    }
+
+    // Transient error — wait 3 s and try once more before giving up.
+    logger.warn('QBO token refresh failed (attempt 1), retrying in 3 s…', { error: firstErr.message });
+    await new Promise(r => setTimeout(r, 3000));
+
+    try {
+      return await attemptRefresh();
+    } catch (secondErr) {
+      logger.error('QBO token refresh failed (both attempts)', { error: secondErr.message });
+      throw new Error('QuickBooks token refresh failed. Please reconnect.');
+    }
   }
 }
 

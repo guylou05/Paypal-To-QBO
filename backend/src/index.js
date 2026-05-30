@@ -3,7 +3,7 @@ const app       = require('./app');
 const config    = require('./config');
 const db        = require('./db/knex');
 const logger    = require('./utils/logger');
-const { initScheduler } = require('./services/scheduler');
+const { initScheduler, initQboTokenRefresh } = require('./services/scheduler');
 const { startWorker }   = require('./services/syncWorker');
 
 async function start() {
@@ -22,6 +22,10 @@ async function start() {
 
   // Start auto-import scheduler (reads enabled/cron from DB settings).
   await initScheduler();
+
+  // Proactively keep QBO access token warm (refreshes every 45 min).
+  // Prevents mid-request token expiry and the null-overwrite bug on idle servers.
+  initQboTokenRefresh();
 
   // Start server-side sync worker (processes sync_jobs queue).
   startWorker();
