@@ -214,12 +214,14 @@ function buildPurchasePayload(tx, meta, { paymentAccount, expenseAccount, amount
     Line:        [lineItem],
   };
 
-  // Vendor/Customer entity at the document level (not inside lines for Purchase)
+  // Vendor/Customer entity at the document level (not inside lines for Purchase).
+  // QBO Purchase EntityRef uses lowercase "type" — uppercase "Type" is rejected
+  // with "property specified is unsupported or invalid".
   if (opts.entity) {
     payload.EntityRef = {
-      value: opts.entity.EntityRef.value,
-      name:  opts.entity.EntityRef.name,
-      Type:  opts.entity.Type,
+      value: String(opts.entity.EntityRef.value),           // ensure string, not int
+      name:  opts.entity.EntityRef.name || '',
+      type:  opts.entity.Type,                              // lowercase 't' required by QBO
     };
   }
 

@@ -140,12 +140,18 @@ async function apiCall(method, path, data = null) {
     });
     return resp.data;
   } catch (err) {
-    const body = err.response && err.response.data;
-    logger.error('QBO API error', { method, path, status: err.response && err.response.status, body });
-    throw new Error(
-      `QBO API ${method} ${path} failed: ` +
-      (body && body.Fault ? body.Fault.Error[0].Detail : err.message)
-    );
+    const body   = err.response && err.response.data;
+    const status = err.response && err.response.status;
+    logger.error('QBO API error', { method, path, status, body: JSON.stringify(body) });
+
+    // Build a detailed error message that includes element/code when available
+    let detail = err.message;
+    if (body && body.Fault && Array.isArray(body.Fault.Error) && body.Fault.Error.length) {
+      const e = body.Fault.Error[0];
+      detail = [e.Detail || e.Message, e.element ? `(element: ${e.element})` : null, e.code ? `[code ${e.code}]` : null]
+        .filter(Boolean).join(' ');
+    }
+    throw new Error(`QBO API ${method} ${path} failed: ${detail}`);
   }
 }
 
