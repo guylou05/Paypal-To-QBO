@@ -16,9 +16,18 @@ router.use(authenticate, requireAdmin);
 
 const VALID_STATUSES = ['imported', 'classified', 'needs_review', 'approved', 'synced', 'ignored', 'failed'];
 const VALID_CATEGORIES = [
-  'sale', 'paypal_fee', 'paypal_credit_purchase', 'paypal_credit_repayment',
-  'bank_transfer_in', 'bank_transfer_out', 'refund', 'noise', 'unknown',
-  'funding_detail',  // internal split-funding sub-transactions; auto-set by importer
+  // Income
+  'sale', 'subscription', 'donation_received',
+  // Outflows
+  'purchase', 'paypal_fee', 'international_fee', 'payout',
+  // PayPal Credit
+  'paypal_credit_purchase', 'paypal_credit_repayment',
+  // Transfers
+  'bank_transfer_in', 'bank_transfer_out',
+  // Reversals & adjustments
+  'refund', 'chargeback', 'adjustment', 'currency_conversion',
+  // Internal / suppressed
+  'noise', 'unknown', 'funding_detail',
 ];
 const VALID_TRANSACTION_TYPES = [
   'Payment', 'Invoice', 'Transfer', 'Refund', 'Purchase', 'Bank Payout', 'Other',
