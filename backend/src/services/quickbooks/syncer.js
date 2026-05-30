@@ -65,6 +65,60 @@ const db     = require('../../db/knex');
 const qbo    = require('./client');
 const logger = require('../../utils/logger');
 
+// ── Duplicate-DocNumber recovery helpers ───────────────────────────────────
+
+/**
+ * Returns true when a QBO API error is "Duplicate Document Number" (code 6140).
+ * This happens when our app created the QBO object but the DB update to 'synced'
+ * failed (crash / race), causing a retry to hit the same DocNumber again.
+ */
+function isDuplicateDocNumberError(err) {
+  const msg = err.message || '';
+  return msg.includes('[code 6140]') || msg.includes('code 6140') ||
+    msg.toLowerCase().includes('duplicate document number');
+}
+
+/**
+ * Query QBO for an existing object of the given type by DocNumber.
+ * Used to recover from a 6140 error by linking to the already-created object.
+ * Returns the object or null if not found / query fails.
+ */
+async function findExistingQboByDocNumber(objectType, docNumber) {
+  try {
+    const resp = await qbo.apiCall('GET', '/query', {
+      query: `SELECT * FROM ${objectType} WHERE DocNumber = '${docNumber.replace(/'/g, "\\'")}' MAXRESULTS 1`,
+      minorversion: 65,
+    });
+    const list = resp.QueryResponse && resp.QueryResponse[objectType];
+    return (list && list[0]) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Call createFn() and, if QBO rejects with a 6140 Duplicate DocNumber error,
+ * look up and return the already-existing object instead of propagating the error.
+ * Handles the race-condition / crash-after-create scenario transparently.
+ */
+async function createWithDuplicateRecovery(objectType, createFn, docNumber) {
+  try {
+    return await createFn();
+  } catch (err) {
+    if (isDuplicateDocNumberError(err) && docNumber) {
+      const existing = await findExistingQboByDocNumber(objectType, docNumber);
+      if (existing) {
+        logger.warn(
+          `QBO ${objectType} DocNumber "${docNumber}" already exists (#${existing.Id}) — ` +
+          `linking to existing object (previous sync completed but DB update may have crashed)`
+        );
+        return existing;
+      }
+    }
+    throw err;
+  }
+}
+
 // ── Meta helpers ───────────────────────────────────────────────────────────
 
 /** Safe-parse qbo_metadata whether it's a string or already an object. */
@@ -190,7 +244,7 @@ function buildJE(lines, tx, meta, docSuffix = '') {
  * meta           — full qbo_metadata; entity = Vendor unless entityType overridden.
  * docSuffix      — appended between "PP" and "-{txId}" in DocNumber.
  */
-function buildPurchasePayload(tx, meta, { paymentAccount, expenseAccount, amount, docSuffix, description, entityType }) {
+function buildPurchasePayload(tx, meta, { paymentAccount, expenseAccount, amount, docSuffix, description, entityType, paymentType }) {
   const opts     = metaOptions(meta, entityType || 'Vendor');
   const classRef = opts.classRef;
 
@@ -198,15 +252,19 @@ function buildPurchasePayload(tx, meta, { paymentAccount, expenseAccount, amount
     Amount:     parseFloat(Math.abs(amount).toFixed(2)),
     DetailType: 'AccountBasedExpenseLineDetail',
     AccountBasedExpenseLineDetail: {
-      AccountRef: { value: expenseAccount.id, name: expenseAccount.name },
+      // QBO requires AccountRef.value to be a string — cast defensively
+      AccountRef: { value: String(expenseAccount.id), name: expenseAccount.name },
       ...(classRef ? { ClassRef: classRef } : {}),
     },
     Description: (description || '').slice(0, 255),
   };
 
   const payload = {
-    PaymentType: 'Cash',
-    AccountRef:  { value: paymentAccount.id, name: paymentAccount.name },
+    // QBO rejects 'Cash' when AccountRef is a Bank-type account.
+    // Use 'Check' (correct for bank/PayPal Balance) unless caller passes 'CreditCard'.
+    PaymentType: paymentType || 'Check',
+    // Cast ID to string — QBO rejects numeric account IDs
+    AccountRef:  { value: String(paymentAccount.id), name: paymentAccount.name },
     TxnDate:     tx.transaction_date,
     DocNumber:   `PP${docSuffix || ''}-${tx.paypal_transaction_id}`.slice(0, 21),
     PrivateNote: buildNote(tx, meta),
@@ -264,11 +322,11 @@ async function buildSale(tx) {
   const classRef   = meta.class_id ? { value: meta.class_id, name: meta.class_name || '' } : null;
 
   const srPayload = {
-    CustomerRef:         { value: customerId, name: customerName },
+    CustomerRef:         { value: String(customerId), name: customerName },
     TxnDate:             tx.transaction_date,
     DocNumber:           `PP-${tx.paypal_transaction_id}`.slice(0, 21),
     PrivateNote:         buildNote(tx, meta),
-    DepositToAccountRef: { value: paypalBank.id, name: paypalBank.name },
+    DepositToAccountRef: { value: String(paypalBank.id), name: paypalBank.name },
     Line: [
       {
         Amount:     parseFloat(gross.toFixed(2)),
@@ -383,6 +441,7 @@ async function buildCreditPurchase(tx) {
     amount,
     docSuffix:      'CC',
     description:    `PayPal Credit purchase: ${memo}`,
+    paymentType:    'CreditCard',     // PayPal Credit is a credit-card liability
   });
 }
 
@@ -401,8 +460,9 @@ async function buildCreditRepayment(tx) {
     type: 'Transfer',
     payload: {
       Amount:         parseFloat(amount.toFixed(2)),
-      FromAccountRef: { value: paypalBank.id,  name: paypalBank.name  },
-      ToAccountRef:   { value: paypalCredit.id, name: paypalCredit.name },
+      // Cast IDs to strings — QBO rejects numeric account IDs with "missing" error
+      FromAccountRef: { value: String(paypalBank.id),   name: paypalBank.name   },
+      ToAccountRef:   { value: String(paypalCredit.id), name: paypalCredit.name },
       TxnDate:        tx.transaction_date,
       PrivateNote:    buildNote(tx, meta),
     },
@@ -422,8 +482,9 @@ async function buildBankTransferIn(tx) {
     type: 'Transfer',
     payload: {
       Amount:         parseFloat(amount.toFixed(2)),
-      FromAccountRef: { value: bankAccount.id, name: bankAccount.name },
-      ToAccountRef:   { value: paypalBank.id,  name: paypalBank.name  },
+      // Cast IDs to strings — QBO rejects numeric account IDs with "missing" error
+      FromAccountRef: { value: String(bankAccount.id), name: bankAccount.name },
+      ToAccountRef:   { value: String(paypalBank.id),  name: paypalBank.name  },
       TxnDate:        tx.transaction_date,
       PrivateNote:    buildNote(tx, meta),
     },
@@ -443,8 +504,9 @@ async function buildBankTransferOut(tx) {
     type: 'Transfer',
     payload: {
       Amount:         parseFloat(amount.toFixed(2)),
-      FromAccountRef: { value: paypalBank.id,  name: paypalBank.name  },
-      ToAccountRef:   { value: bankAccount.id, name: bankAccount.name },
+      // Cast IDs to strings — QBO rejects numeric account IDs with "missing" error
+      FromAccountRef: { value: String(paypalBank.id),  name: paypalBank.name  },
+      ToAccountRef:   { value: String(bankAccount.id), name: bankAccount.name },
       TxnDate:        tx.transaction_date,
       PrivateNote:    buildNote(tx, meta),
     },
@@ -569,11 +631,11 @@ async function buildRefund(tx) {
     return {
       type: 'RefundReceipt',
       payload: {
-        CustomerRef:         { value: customerId, name: customerName },
+        CustomerRef:         { value: String(customerId), name: customerName },
         TxnDate:             tx.transaction_date,
         PaymentRefNum:       tx.paypal_transaction_id,
         PrivateNote:         buildNote(tx, meta),
-        DepositToAccountRef: { value: paypalBank.id, name: paypalBank.name },
+        DepositToAccountRef: { value: String(paypalBank.id), name: paypalBank.name },
         Line: [
           {
             Amount:     parseFloat(absGross.toFixed(2)),
@@ -723,11 +785,21 @@ async function syncTransaction(tx, userId) {
     } else if (isSaleWithFee) {
       // ── SalesReceipt (primary) + Purchase fee ────────────────────────────
       qboObjectType = 'SalesReceipt';
-      qboObject     = await qbo.createSalesReceipt(built.primary.payload);
-      qboId         = qboObject.Id;
-      qboSyncToken  = qboObject.SyncToken;
+      // Use duplicate-recovery: if a previous sync created the SR but crashed
+      // before updating our DB, we link to the existing object instead of failing.
+      qboObject = await createWithDuplicateRecovery(
+        'SalesReceipt',
+        () => qbo.createSalesReceipt(built.primary.payload),
+        built.primary.payload.DocNumber
+      );
+      qboId        = qboObject.Id;
+      qboSyncToken = qboObject.SyncToken;
 
-      const feeObj  = await qbo.createPurchase(built.fee.payload);
+      const feeObj = await createWithDuplicateRecovery(
+        'Purchase',
+        () => qbo.createPurchase(built.fee.payload),
+        built.fee.payload.DocNumber
+      );
       feeQboId         = feeObj.Id;
       feeQboSyncToken  = feeObj.SyncToken;
       feeQboObjectType = 'Purchase';
@@ -749,11 +821,25 @@ async function syncTransaction(tx, userId) {
       const { type, payload } = built;
       qboObjectType = type;
       switch (type) {
-        case 'JournalEntry':  qboObject = await qbo.createJournalEntry(payload);  break;
-        case 'Transfer':      qboObject = await qbo.createTransfer(payload);       break;
-        case 'Purchase':      qboObject = await qbo.createPurchase(payload);       break;
-        case 'SalesReceipt':  qboObject = await qbo.createSalesReceipt(payload);  break;
-        case 'RefundReceipt': qboObject = await qbo.createRefundReceipt(payload);  break;
+        case 'JournalEntry':
+          qboObject = await createWithDuplicateRecovery(
+            'JournalEntry', () => qbo.createJournalEntry(payload), payload.DocNumber);
+          break;
+        case 'Transfer':
+          qboObject = await qbo.createTransfer(payload); // Transfer has no DocNumber
+          break;
+        case 'Purchase':
+          qboObject = await createWithDuplicateRecovery(
+            'Purchase', () => qbo.createPurchase(payload), payload.DocNumber);
+          break;
+        case 'SalesReceipt':
+          qboObject = await createWithDuplicateRecovery(
+            'SalesReceipt', () => qbo.createSalesReceipt(payload), payload.DocNumber);
+          break;
+        case 'RefundReceipt':
+          qboObject = await createWithDuplicateRecovery(
+            'RefundReceipt', () => qbo.createRefundReceipt(payload), payload.DocNumber);
+          break;
         default: throw new Error(`Unknown QBO object type: ${type}`);
       }
       qboId        = qboObject.Id;
