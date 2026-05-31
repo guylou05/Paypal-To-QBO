@@ -548,9 +548,13 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
   const [vendorId,     setVendorId]     = useState(existingMeta.vendor_id     || '');
   const [vendorName,   setVendorName]   = useState(existingMeta.vendor_name   || '');
 
-  // ── Customer auto-match memory ────────────────────────────────────────────
+  // ── Customer / field auto-match memory ───────────────────────────────────
   // source: 'memory' (from payer_customer_matches DB) | 'name_fuzzy' | null
-  const [autoMatch,    setAutoMatch]    = useState(null); // { source, matchCount }
+  const [autoMatch,        setAutoMatch]        = useState(null); // { source, matchCount }
+  const [autoMatchVendor,  setAutoMatchVendor]  = useState(null);
+  const [autoMatchExpense, setAutoMatchExpense] = useState(null);
+  const [autoMatchIncome,  setAutoMatchIncome]  = useState(null);
+  const [autoMatchClass,   setAutoMatchClass]   = useState(null);
 
   // ── Vendor / customer auto-create ─────────────────────────────────────────
   const [vendorCreating,   setVendorCreating]   = useState(false);
@@ -684,12 +688,11 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qboData]);
 
-  // ── Memory-based customer match (fires once after customers list is ready) ──
+  // ── Memory recall — fires once when QBO data arrives ─────────────────────
+  // Looks up remembered QBO fields for this payer and pre-fills customer,
+  // vendor, expense/income account, and class from the last reviewer's choices.
   useEffect(() => {
-    // Only relevant for income-direction transactions not already customer-tagged
-    if (existingMeta.customer_id) return;
-    if (!customers.length) return;
-    if (direction !== 'income') return;
+    if (!qboData) return;
 
     const email = tx.payer_email || '';
     const name  = tx.payer_name  || '';
@@ -700,18 +703,59 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
         const match = r.data.match;
         if (!match) return;
 
-        // Verify the remembered customer still exists in QBO list
-        const found = customers.find(c => c.Id === match.qbo_customer_id);
-        if (!found) return;
+        // ── Customer (income direction) ────────────────────────────────────
+        if (!existingMeta.customer_id && direction === 'income' && match.qbo_customer_id) {
+          const found = customers.find(c => c.Id === match.qbo_customer_id);
+          if (found) {
+            setCustomerId(match.qbo_customer_id);
+            setCustomerName(match.qbo_customer_name || found.DisplayName);
+            setAutoMatch({ source: 'memory', matchCount: match.match_count });
+          }
+        }
 
-        // Memory match beats fuzzy-name suggestion — always apply it
-        setCustomerId(match.qbo_customer_id);
-        setCustomerName(match.qbo_customer_name || found.DisplayName);
-        setAutoMatch({ source: 'memory', matchCount: match.match_count });
+        // ── Vendor (expense direction) ─────────────────────────────────────
+        if (!existingMeta.vendor_id && direction === 'expense' && match.qbo_vendor_id) {
+          const found = vendors.find(v => v.Id === match.qbo_vendor_id);
+          if (found) {
+            setVendorId(match.qbo_vendor_id);
+            setVendorName(match.qbo_vendor_name || found.DisplayName);
+            setAutoMatchVendor({ source: 'memory', matchCount: match.match_count });
+          }
+        }
+
+        // ── Expense account ────────────────────────────────────────────────
+        if (!existingMeta.expense_account_id && direction === 'expense' && match.expense_account_id) {
+          const found = expenseAccounts.find(a => a.Id === match.expense_account_id);
+          if (found) {
+            setExpenseAccountId(match.expense_account_id);
+            setExpenseAccountName(match.expense_account_name || found.FullyQualifiedName || found.Name);
+            setAutoMatchExpense({ source: 'memory', matchCount: match.match_count });
+          }
+        }
+
+        // ── Income account ─────────────────────────────────────────────────
+        if (!existingMeta.income_account_id && direction === 'income' && match.income_account_id) {
+          const found = incomeAccounts.find(a => a.Id === match.income_account_id);
+          if (found) {
+            setIncomeAccountId(match.income_account_id);
+            setIncomeAccountName(match.income_account_name || found.FullyQualifiedName || found.Name);
+            setAutoMatchIncome({ source: 'memory', matchCount: match.match_count });
+          }
+        }
+
+        // ── Class (any direction) ──────────────────────────────────────────
+        if (!existingMeta.class_id && match.class_id) {
+          const found = classes.find(c => c.Id === match.class_id);
+          if (found) {
+            setClassId(match.class_id);
+            setClassName(match.class_name || found.FullyQualifiedName || found.Name);
+            setAutoMatchClass({ source: 'memory', matchCount: match.match_count });
+          }
+        }
       })
       .catch(() => {}); // Non-fatal
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customers]);
+  }, [qboData]);
 
   // ── Change handlers ───────────────────────────────────────────────────────
   const pickCustomer = useCallback((id) => {
@@ -724,6 +768,7 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
   const pickVendor = useCallback((id) => {
     setVendorId(id);
     setVendorName(vendors.find(x => x.Id === id)?.DisplayName || '');
+    setAutoMatchVendor(null);
   }, [vendors]);
 
   // ── Inline QBO entity creation handlers ──────────────────────────────────
@@ -769,12 +814,14 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
     setIncomeAccountId(id);
     const a = incomeAccounts.find(x => x.Id === id);
     setIncomeAccountName(a ? (a.FullyQualifiedName || a.Name) : '');
+    setAutoMatchIncome(null);
   }, [incomeAccounts]);
 
   const pickExpenseAccount = useCallback((id) => {
     setExpenseAccountId(id);
     const a = expenseAccounts.find(x => x.Id === id);
     setExpenseAccountName(a ? (a.FullyQualifiedName || a.Name) : '');
+    setAutoMatchExpense(null);
   }, [expenseAccounts]);
 
   const pickBankAccount = useCallback((id) => {
@@ -787,6 +834,7 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
     setClassId(id);
     const c = classes.find(x => x.Id === id);
     setClassName(c ? (c.FullyQualifiedName || c.Name) : '');
+    setAutoMatchClass(null);
   }, [classes]);
 
   // ── Live meta for preview ─────────────────────────────────────────────────
@@ -1028,7 +1076,7 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
                     creating={vendorCreating}
                     createLabel="Create vendor"
                   />
-                  <MatchChip name={vendorName} />
+                  <MatchChip name={vendorName} source={autoMatchVendor?.source} matchCount={autoMatchVendor?.matchCount} />
                 </>
               )}
             </SectionCard>
@@ -1062,6 +1110,7 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
                 getKey={a => a.Id} getLabel={a => a.FullyQualifiedName || a.Name}
                 loading={qboLoading} disabled={isSynced}
               />
+              <MatchChip name={incomeAccountName} source={autoMatchIncome?.source} matchCount={autoMatchIncome?.matchCount} />
 
               {/* Fee note — always automatic in the new SalesReceipt + Expense model */}
               {hasFee && (
@@ -1086,6 +1135,7 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
                 getKey={a => a.Id} getLabel={a => a.FullyQualifiedName || a.Name}
                 loading={qboLoading} disabled={isSynced}
               />
+              <MatchChip name={expenseAccountName} source={autoMatchExpense?.source} matchCount={autoMatchExpense?.matchCount} />
             </SectionCard>
           )}
 
@@ -1268,6 +1318,7 @@ export default function EditModal({ tx, isSandbox, qboData, qboLoading, qboEnvir
                     getKey={c => c.Id} getLabel={c => c.FullyQualifiedName || c.Name}
                     loading={qboLoading} disabled={isSynced}
                   />
+                  <MatchChip name={className} source={autoMatchClass?.source} matchCount={autoMatchClass?.matchCount} />
                 </div>
               )}
               <div>

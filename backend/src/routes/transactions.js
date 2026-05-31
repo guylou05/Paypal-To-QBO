@@ -215,45 +215,54 @@ router.patch('/:id',
 
     await db('normalized_transactions').where({ id: tx.id }).update(updates);
 
-    // ── Customer auto-match memory ────────────────────────────────────────────
-    // When the reviewer explicitly assigns a QBO customer, remember the mapping
-    // payer_email (or payer_name as fallback) → customer_id so future transactions
-    // from the same payer can be auto-populated without re-reviewing.
-    const savedMeta  = updates.qbo_metadata;
-    const custId     = savedMeta?.customer_id;
-    const custName   = savedMeta?.customer_name;
+    // ── Payer auto-match memory ───────────────────────────────────────────────
+    // When the reviewer saves QBO metadata, remember per-payer selections so
+    // future transactions from the same payer are pre-filled in the Edit Modal.
+    // Covers: customer, vendor, expense account, income account, QBO class.
+    const savedMeta = updates.qbo_metadata;
+    if (savedMeta) {
+      const email = (tx.payer_email || '').trim().toLowerCase();
+      const name  = (tx.payer_name  || '').trim().toLowerCase();
+      const key   = email || name;
+      const mtype = email ? 'email' : 'name';
 
-    if (custId) {
-      const email  = (tx.payer_email || '').trim().toLowerCase();
-      const name   = (tx.payer_name  || '').trim().toLowerCase();
-      const key    = email || name;
-      const mtype  = email ? 'email' : 'name';
+      // Build memory update — only persist fields the reviewer explicitly set.
+      const memFields = {};
+      if (savedMeta.customer_id)
+        { memFields.qbo_customer_id = savedMeta.customer_id; memFields.qbo_customer_name = savedMeta.customer_name || ''; }
+      if (savedMeta.vendor_id)
+        { memFields.qbo_vendor_id = savedMeta.vendor_id;     memFields.qbo_vendor_name   = savedMeta.vendor_name   || ''; }
+      if (savedMeta.expense_account_id)
+        { memFields.expense_account_id = savedMeta.expense_account_id; memFields.expense_account_name = savedMeta.expense_account_name || ''; }
+      if (savedMeta.income_account_id)
+        { memFields.income_account_id  = savedMeta.income_account_id;  memFields.income_account_name  = savedMeta.income_account_name  || ''; }
+      if (savedMeta.class_id)
+        { memFields.class_id = savedMeta.class_id; memFields.class_name = savedMeta.class_name || ''; }
 
-      if (key) {
+      if (key && Object.keys(memFields).length > 0) {
         try {
           const existing = await db('payer_customer_matches').where({ match_key: key }).first();
           if (existing) {
             await db('payer_customer_matches').where({ match_key: key }).update({
-              qbo_customer_id:   custId,
-              qbo_customer_name: custName || existing.qbo_customer_name,
-              match_count:       existing.match_count + 1,
-              last_matched_at:   new Date(),
-              updated_at:        new Date(),
+              ...memFields,
+              match_count:     existing.match_count + 1,
+              last_matched_at: new Date(),
+              updated_at:      new Date(),
             });
           } else {
+            // qbo_customer_id is now nullable — expense-only payees are OK.
             await db('payer_customer_matches').insert({
-              match_key:         key,
-              match_type:        mtype,
-              qbo_customer_id:   custId,
-              qbo_customer_name: custName || '',
-              match_count:       1,
-              last_matched_at:   new Date(),
-              created_at:        new Date(),
-              updated_at:        new Date(),
+              match_key:   key,
+              match_type:  mtype,
+              match_count: 1,
+              last_matched_at: new Date(),
+              created_at:  new Date(),
+              updated_at:  new Date(),
+              ...memFields,
             });
           }
         } catch (err) {
-          // Non-fatal — don't block the save if the memory upsert fails
+          // Non-fatal — never block the save on a memory upsert failure.
           logger.warn('Failed to upsert payer_customer_matches', { error: err.message });
         }
       }
