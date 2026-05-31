@@ -77,10 +77,16 @@ async function getValidAccessToken() {
     return { accessToken: decrypt(stored.access_token_encrypted), realmId: stored.realm_id };
   }
 
-  // Try refresh
-  const refreshToken = stored.refresh_token_encrypted
-    ? decrypt(stored.refresh_token_encrypted)
-    : null;
+  // Try refresh — decrypt safely so a bad key gives a clean error, not a crash
+  let refreshToken = null;
+  if (stored.refresh_token_encrypted) {
+    try {
+      refreshToken = decrypt(stored.refresh_token_encrypted);
+    } catch (decErr) {
+      logger.error('QBO refresh token decryption failed', { error: decErr.message });
+      throw new Error('QuickBooks token decryption failed — encryption key may have changed. Please reconnect.');
+    }
+  }
   if (!refreshToken) throw new Error('QuickBooks refresh token missing. Please reconnect.');
 
   logger.info('QBO: refreshing access token');
@@ -96,14 +102,29 @@ async function getValidAccessToken() {
     return { accessToken: newToken.access_token, realmId: stored.realm_id };
   };
 
+  // Determine whether a refresh error is permanent (token revoked/expired) or transient.
+  // intuit-oauth sometimes buries the error type in nested properties rather than message.
+  function isPermanentRefreshError(err) {
+    const msg     = (err.message || '').toLowerCase();
+    const errProp = (typeof err.error === 'string' ? err.error : '').toLowerCase();
+    // Stringify to catch invalid_grant/unauthorized in any nested field
+    let full = '';
+    try { full = JSON.stringify(err).toLowerCase(); } catch { /* ignore circular */ }
+    const status = err.response?.status || err.authResponse?.getStatus?.() || 0;
+
+    return (
+      status === 401 ||
+      msg.includes('invalid_grant')  || errProp.includes('invalid_grant')  || full.includes('invalid_grant')  ||
+      msg.includes('unauthorized')   || errProp.includes('unauthorized')   ||
+      msg.includes('token_revoked')  || full.includes('token_revoked')  ||
+      msg.includes('refresh_token_expired') || full.includes('refresh_token_expired')
+    );
+  }
+
   try {
     return await attemptRefresh();
   } catch (firstErr) {
-    // Distinguish permanent failures (revoked/expired token) from transient ones.
-    const msg = (firstErr.message || '').toLowerCase();
-    const permanent = msg.includes('invalid_grant') || msg.includes('unauthorized');
-
-    if (permanent) {
+    if (isPermanentRefreshError(firstErr)) {
       logger.error('QBO refresh token revoked or expired — reconnect required', { error: firstErr.message });
       throw new Error('QuickBooks connection expired. Please reconnect in Setup.');
     }
@@ -115,8 +136,12 @@ async function getValidAccessToken() {
     try {
       return await attemptRefresh();
     } catch (secondErr) {
+      if (isPermanentRefreshError(secondErr)) {
+        logger.error('QBO refresh token revoked or expired (attempt 2)', { error: secondErr.message });
+        throw new Error('QuickBooks connection expired. Please reconnect in Setup.');
+      }
       logger.error('QBO token refresh failed (both attempts)', { error: secondErr.message });
-      throw new Error('QuickBooks token refresh failed. Please reconnect.');
+      throw new Error('QuickBooks token refresh failed. Please reconnect in Setup.');
     }
   }
 }
