@@ -131,7 +131,7 @@ const REFUND_EVENT_CODES         = ['T1106', 'T1107', 'T1108', 'T1109', 'T0020']
 const CHARGEBACK_EVENT_CODES     = ['T1700', 'T1701', 'T1702'];
 const REVERSAL_EVENT_CODES       = ['T1110', 'T3500'];
 const HOLD_EVENT_CODES           = ['T2101', 'T3000', 'T3001', 'T3002', 'T1501', 'T1105'];  // T1501/T1105 = Temporary Hold (cancelled authorization)
-const BANK_IN_EVENT_CODES        = ['T1201'];
+const BANK_IN_EVENT_CODES        = ['T1201', 'T0300'];  // T0300 = Added Funds from Bank Account
 const BANK_OUT_EVENT_CODES       = ['T1202'];
 const CREDIT_EVENT_CODES         = ['T1601', 'T1602', 'T1603'];
 const FEE_EVENT_CODES            = ['T0007'];

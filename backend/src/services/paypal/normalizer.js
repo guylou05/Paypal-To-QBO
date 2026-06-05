@@ -76,9 +76,10 @@ function deriveTransactionType(eventCode, description, category, grossAmount) {
   // Debit / correction events (T10xx)
   if (code.startsWith('T10')) return moneyIn ? 'Payment' : 'Refund';
 
-  // Chargebacks and dispute resolutions (T03xx)
-  if (code === 'T0301') return 'Refund';  // Chargeback filed → money held/out
-  if (code === 'T0302') return 'Payment'; // Chargeback reversal → money returned
+  // T03xx — mixed family: T0300 = bank funding (Transfer), T0301/T0302 = dispute/reversal
+  if (code === 'T0300') return 'Transfer'; // Added Funds from Bank Account
+  if (code === 'T0301') return 'Refund';   // Dispute filed → money held/out
+  if (code === 'T0302') return 'Payment';  // Dispute reversal → money returned
   if (code.startsWith('T03')) return moneyIn ? 'Payment' : 'Refund';
 
   // Chargeback settlement / escrow (T12xx, T13xx)
