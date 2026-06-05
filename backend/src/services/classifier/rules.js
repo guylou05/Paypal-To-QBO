@@ -138,11 +138,17 @@ const FEE_EVENT_CODES            = ['T0007'];
 const CONVERSION_EVENT_CODES     = ['T1000', 'T1001'];
 const ADJUSTMENT_EVENT_CODES     = ['T1400', 'T2102'];   // fee reversal, hold released
 
+// T07xx codes OTHER than T0007 are internal PayPal bookkeeping entries
+// (e.g. T0700 = fee note attached to a donation payment) — not standalone
+// economic events. T0007 stays in FEE_EVENT_CODES because it IS a real
+// standalone fee that needs to be recorded in QBO.
+const INTERNAL_FEE_EVENT_CODES   = ['T0700', 'T0701', 'T0702', 'T0703', 'T0704', 'T0705'];
+
 // ── Rules ──────────────────────────────────────────────────────────────────
 
 const RULES = [
 
-  // ── 1. Noise / authorizations / holds ─────────────────────────────────────
+  // ── 1. Noise / authorizations / holds / internal fee notes ───────────────
   {
     priority:    10,
     category:   'noise',
@@ -152,7 +158,8 @@ const RULES = [
     test: tx =>
       matchesAny(tx.description, NOISE_KEYWORDS) ||
       matchesAny(tx.event_code, HOLD_EVENT_CODES) ||
-      REVERSAL_EVENT_CODES.includes(tx.event_code),
+      REVERSAL_EVENT_CODES.includes(tx.event_code) ||
+      INTERNAL_FEE_EVENT_CODES.includes(tx.event_code),
   },
 
   // ── 2. PayPal Credit repayment (must come before credit purchase) ──────────
