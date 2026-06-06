@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<!--
+=============================================================================
+  WEBCAREPLEADER — Website Maintenance Services — Elementor Landing Page
+=============================================================================
+
+  ELEMENTOR SETUP NOTES (global)
+  ─────────────────────────────────────────────────────────────────────────
+  • Layout engine : Flexbox Containers (enable in Elementor → Experiments)
+  • Max content width : 1160 px
+  • Column gap default : 20 px
+  • Base font : Inter or DM Sans (Google Fonts)
+  • Heading font : Same family, weight 700–800
+  • Primary colour : #1B4FFF  (trust-blue)
+  • Accent colour : #00C48C  (growth-green)
+  • Dark bg colour : #0D1B2A  (deep navy)
+  • Light bg colour : #F5F7FA  (off-white)
+  • Card border-radius : 12 px
+  • Button border-radius : 6 px
+  • Button padding : 14px 32px
+  • All sections use top/bottom padding 80px desktop, 48px mobile
+  ─────────────────────────────────────────────────────────────────────────
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Website Maintenance Services | WebCareLeader</title>
+  <meta name="description" content="Professional website maintenance plans for small businesses, nonprofits, and local service businesses. Get a free website checkup today." />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ── RESET & BASE ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', sans-serif;
+      font-size: 17px;
+      line-height: 1.7;
+      color: #1A202C;
+      background: #ffffff;
+    }
+
+    /* ── DESIGN TOKENS ── */
+    :root {
+      --primary:   #1B4FFF;
+      --primary-dark: #1340CC;
+      --accent:    #00C48C;
+      --dark-bg:   #0D1B2A;
+      --light-bg:  #F5F7FA;
+      --text:      #1A202C;
+      --text-muted:#5A6478;
+      --white:     #ffffff;
+      --border:    #E2E8F0;
+      --radius-card: 12px;
+      --radius-btn:  6px;
+      --shadow-card: 0 4px 24px rgba(0,0,0,.08);
+      --max-w:     1160px;
+    }
+
+    /* ── UTILITIES ── */
+    .container { max-width: var(--max-w); margin: 0 auto; padding: 0 24px; }
+    .section    { padding: 88px 0; }
+    .section--light { background: var(--light-bg); }
+    .section--dark  { background: var(--dark-bg); color: var(--white); }
+
+    .badge {
+      display: inline-block;
+      background: rgba(27,79,255,.10);
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      padding: 6px 16px;
+      border-radius: 100px;
+      margin-bottom: 16px;
+    }
+    .section--dark .badge {
+      background: rgba(255,255,255,.12);
+      color: #93C5FD;
+    }
+
+    h1 { font-size: clamp(2.2rem, 4.5vw, 3.4rem); font-weight: 800; line-height: 1.18; }
+    h2 { font-size: clamp(1.8rem, 3.2vw, 2.6rem); font-weight: 700; line-height: 1.22; }
+    h3 { font-size: 1.18rem; font-weight: 700; }
+    p  { color: var(--text-muted); }
+
+    .section--dark p,
+    .section--dark h2,
+    .section--dark h3 { color: #E2E8F0; }
+    .section--dark .text-muted { color: #94A3B8; }
+
+    /* ── BUTTONS ── */
+    .btn {
+      display: inline-block;
+      padding: 15px 36px;
+      border-radius: var(--radius-btn);
+      font-weight: 700;
+      font-size: 1rem;
+      text-decoration: none;
+      cursor: pointer;
+      transition: transform .15s, box-shadow .15s, background .15s;
+      border: none;
+    }
+    .btn--primary {
+      background: var(--primary);
+      color: var(--white);
+      box-shadow: 0 4px 16px rgba(27,79,255,.32);
+    }
+    .btn--primary:hover {
+      background: var(--primary-dark);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(27,79,255,.40);
+    }
+    .btn--accent {
+      background: var(--accent);
+      color: var(--white);
+      box-shadow: 0 4px 16px rgba(0,196,140,.32);
+    }
+    .btn--accent:hover {
+      background: #00a878;
+      transform: translateY(-2px);
+    }
+    .btn--outline {
+      background: transparent;
+      color: var(--white);
+      border: 2px solid rgba(255,255,255,.50);
+    }
+    .btn--outline:hover { border-color: var(--white); background: rgba(255,255,255,.08); }
+    .btn--ghost {
+      background: transparent;
+      color: var(--primary);
+      border: 2px solid var(--primary);
+    }
+    .btn--ghost:hover { background: var(--primary); color: var(--white); }
+
+    /* ── NAV ── */
+    .nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(255,255,255,.95);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+    }
+    .nav__inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav__logo {
+      font-size: 1.3rem;
+      font-weight: 800;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .nav__logo span { color: var(--primary); }
+    .nav__cta { font-size: .9rem; padding: 10px 22px; }
+
+    /* ── HERO ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background: dark navy (#0D1B2A), min-height 680px, overflow hidden
+      Container → 2 columns (60% / 40%), gap 48px, align-items center
+      Left column: badge → H1 → subtext → button row → trust bar
+      Right column: hero image/illustration (floating browser mockup or device)
+      Add decorative gradient blobs via shape dividers or absolute-positioned widgets
+    */
+    .hero {
+      background: var(--dark-bg);
+      color: var(--white);
+      padding: 96px 0 80px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      width: 700px; height: 700px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(27,79,255,.30) 0%, transparent 70%);
+      top: -200px; right: -100px;
+      pointer-events: none;
+    }
+    .hero::after {
+      content: '';
+      position: absolute;
+      width: 400px; height: 400px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0,196,140,.18) 0%, transparent 70%);
+      bottom: -80px; left: 40px;
+      pointer-events: none;
+    }
+    .hero__grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 56px;
+      align-items: center;
+      position: relative; z-index: 1;
+    }
+    .hero__eyebrow { color: var(--accent); font-size: 14px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 16px; }
+    .hero h1 { color: var(--white); margin-bottom: 24px; }
+    .hero h1 span { color: var(--accent); }
+    .hero__sub {
+      font-size: 1.15rem;
+      color: #94A3B8;
+      margin-bottom: 36px;
+      max-width: 520px;
+    }
+    .hero__cta-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-bottom: 48px; }
+    .hero__trust {
+      display: flex;
+      gap: 28px;
+      flex-wrap: wrap;
+      border-top: 1px solid rgba(255,255,255,.10);
+      padding-top: 28px;
+    }
+    .hero__trust-item { font-size: .88rem; color: #94A3B8; display: flex; align-items: center; gap: 7px; }
+    .hero__trust-item .icon { color: var(--accent); font-size: 1.1rem; }
+
+    /* Hero visual */
+    .hero__visual {
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 18px;
+      padding: 28px;
+      position: relative;
+    }
+    .hero__visual-bar {
+      display: flex; gap: 7px; margin-bottom: 16px;
+    }
+    .hero__visual-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+    }
+    .hero__visual-dot:nth-child(1) { background: #FF5F56; }
+    .hero__visual-dot:nth-child(2) { background: #FFBD2E; }
+    .hero__visual-dot:nth-child(3) { background: #27C93F; }
+    .hero__visual-screen {
+      background: rgba(255,255,255,.06);
+      border-radius: 8px;
+      padding: 20px;
+    }
+    .hero__stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .hero__stat-card {
+      background: rgba(27,79,255,.18);
+      border: 1px solid rgba(27,79,255,.30);
+      border-radius: 10px;
+      padding: 16px;
+      text-align: center;
+    }
+    .hero__stat-card .number { font-size: 1.6rem; font-weight: 800; color: var(--white); }
+    .hero__stat-card .label  { font-size: .75rem; color: #94A3B8; }
+    .hero__stat-card--green { background: rgba(0,196,140,.15); border-color: rgba(0,196,140,.30); }
+    .hero__stat-card--green .number { color: var(--accent); }
+    .hero__uptime-bar { background: rgba(255,255,255,.08); border-radius: 8px; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; }
+    .hero__uptime-bar span:first-child { font-size: .82rem; color: #94A3B8; }
+    .hero__uptime-val { font-weight: 700; color: var(--accent); font-size: .95rem; }
+
+    /* ── PROBLEM ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background white, padding 80px top/bottom
+      Container → 1 column, text-align center → H2 → subtext
+      Then 4-column icon box grid (or 2×2 on tablet)
+      Each card: Icon (Elementor Icon widget, 40px, red/orange colour) + H3 + paragraph
+      No card background — just subtle top border or left accent line
+    */
+    .problem { background: var(--white); }
+    .problem__intro { text-align: center; max-width: 660px; margin: 0 auto 56px; }
+    .problem__intro h2 { margin-bottom: 16px; }
+    .problem__grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+    .problem__card {
+      padding: 28px 24px;
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border);
+      background: var(--white);
+      transition: box-shadow .2s, transform .2s;
+    }
+    .problem__card:hover { box-shadow: var(--shadow-card); transform: translateY(-4px); }
+    .problem__icon {
+      font-size: 2rem;
+      margin-bottom: 14px;
+      display: block;
+    }
+    .problem__card h3 { margin-bottom: 8px; color: var(--text); }
+    .problem__bottom {
+      margin-top: 48px;
+      text-align: center;
+      padding: 32px;
+      background: #FFF5F5;
+      border: 1px solid #FED7D7;
+      border-radius: var(--radius-card);
+    }
+    .problem__bottom p { color: #C53030; font-weight: 600; font-size: 1.02rem; }
+
+    /* ── SERVICES ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background: #F5F7FA
+      Container → badge + H2 centered → subtext → 3-column icon list grid
+      Each service item: row container (icon left + text right)
+      Icon: Elementor Icon widget in a 48px circle container (primary colour 10% opacity bg)
+    */
+    .services { background: var(--light-bg); }
+    .services__intro { text-align: center; max-width: 640px; margin: 0 auto 56px; }
+    .services__intro h2 { margin-bottom: 14px; }
+    .services__grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    .services__item {
+      display: flex;
+      gap: 18px;
+      align-items: flex-start;
+      background: var(--white);
+      border-radius: var(--radius-card);
+      padding: 24px;
+      box-shadow: var(--shadow-card);
+      transition: transform .2s;
+    }
+    .services__item:hover { transform: translateY(-3px); }
+    .services__item-icon {
+      flex-shrink: 0;
+      width: 50px; height: 50px;
+      border-radius: 12px;
+      background: rgba(27,79,255,.08);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+    }
+    .services__item h3 { font-size: 1rem; margin-bottom: 4px; color: var(--text); }
+    .services__item p  { font-size: .88rem; }
+
+    /* ── PRICING ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background dark navy
+      Container → badge + H2 + subtext centered (white text)
+      3-column pricing card layout, middle card visually elevated
+      Popular badge on middle card: absolute-positioned chip
+      Each card: inner container (1 col) → plan name → price → feature list → CTA button
+      Feature list: Elementor Icon List widget, checkmark icons (green)
+      Middle card border: 2px solid primary blue, slight scale(1.04) transform
+    */
+    .pricing { background: var(--dark-bg); }
+    .pricing__intro { text-align: center; max-width: 600px; margin: 0 auto 56px; }
+    .pricing__intro h2 { color: var(--white); margin-bottom: 14px; }
+    .pricing__intro p  { color: #94A3B8; }
+    .pricing__grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; align-items: start; }
+    .pricing__card {
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 16px;
+      padding: 36px 32px;
+      position: relative;
+    }
+    .pricing__card--popular {
+      background: var(--white);
+      border-color: var(--primary);
+      border-width: 2px;
+      transform: scale(1.04);
+    }
+    .pricing__card--popular * { color: var(--text) !important; }
+    .pricing__badge-popular {
+      position: absolute;
+      top: -14px; left: 50%;
+      transform: translateX(-50%);
+      background: var(--primary);
+      color: var(--white) !important;
+      font-size: .75rem;
+      font-weight: 700;
+      padding: 5px 18px;
+      border-radius: 100px;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .pricing__plan-name {
+      font-size: .85rem;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #94A3B8;
+      margin-bottom: 8px;
+    }
+    .pricing__price {
+      margin-bottom: 6px;
+    }
+    .pricing__amount {
+      font-size: 3rem;
+      font-weight: 800;
+      color: var(--white);
+      line-height: 1;
+    }
+    .pricing__card--popular .pricing__amount { color: var(--text); }
+    .pricing__period {
+      font-size: .88rem;
+      color: #94A3B8;
+      margin-bottom: 24px;
+      display: block;
+    }
+    .pricing__card--popular .pricing__period { color: var(--text-muted); }
+    .pricing__tagline {
+      font-size: .92rem;
+      color: #94A3B8;
+      margin-bottom: 28px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid rgba(255,255,255,.10);
+    }
+    .pricing__card--popular .pricing__tagline { color: var(--text-muted); border-color: var(--border); }
+    .pricing__features { list-style: none; margin-bottom: 32px; }
+    .pricing__features li {
+      font-size: .92rem;
+      color: #CBD5E0;
+      padding: 8px 0;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .pricing__card--popular .pricing__features li { color: var(--text); }
+    .pricing__features li::before {
+      content: '✓';
+      color: var(--accent);
+      font-weight: 800;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .pricing__features li.not-included { opacity: .45; }
+    .pricing__features li.not-included::before { content: '—'; color: #94A3B8; }
+    .pricing__btn { display: block; text-align: center; padding: 13px; font-size: .95rem; }
+    .pricing__note { text-align: center; margin-top: 36px; font-size: .9rem; color: #64748B; }
+
+    /* ── WHY WEBCAREPLEADER ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background white
+      Container → 2 columns (50% / 50%), gap 64px, align-items center
+      Left column: badge → H2 → paragraph → 4 differentiator rows
+        Each row: row container → icon circle → text block (H3 + p)
+      Right column: stats block or testimonial card
+        Stat block: 2×2 grid of large number + label cards (light-bg background)
+    */
+    .why { background: var(--white); }
+    .why__grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 72px;
+      align-items: center;
+    }
+    .why__badge { margin-bottom: 14px; }
+    .why__left h2 { margin-bottom: 16px; }
+    .why__left > p { margin-bottom: 36px; }
+    .why__items { display: flex; flex-direction: column; gap: 26px; }
+    .why__item { display: flex; gap: 18px; align-items: flex-start; }
+    .why__item-icon {
+      flex-shrink: 0;
+      width: 46px; height: 46px;
+      border-radius: 10px;
+      background: rgba(27,79,255,.08);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem;
+    }
+    .why__item h3 { margin-bottom: 4px; }
+    .why__right { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .why__stat-card {
+      background: var(--light-bg);
+      border-radius: var(--radius-card);
+      padding: 28px 24px;
+      text-align: center;
+    }
+    .why__stat-card .number {
+      font-size: 2.4rem;
+      font-weight: 800;
+      color: var(--primary);
+      display: block;
+      margin-bottom: 4px;
+    }
+    .why__stat-card .label { font-size: .88rem; color: var(--text-muted); }
+    .why__testimonial {
+      grid-column: 1 / -1;
+      background: var(--primary);
+      border-radius: var(--radius-card);
+      padding: 28px 24px;
+      color: var(--white);
+    }
+    .why__testimonial blockquote { font-size: 1rem; font-style: italic; line-height: 1.65; margin-bottom: 14px; color: rgba(255,255,255,.90); }
+    .why__testimonial cite { font-size: .85rem; font-style: normal; color: rgba(255,255,255,.65); }
+
+    /* ── FAQ ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background #F5F7FA
+      Container → 1 column, max-width 760px, centered
+      Use Elementor Toggle or Accordion widget for FAQ items
+      Accordion icon: + / − (right-aligned)
+      Each item: bold question + paragraph answer
+    */
+    .faq { background: var(--light-bg); }
+    .faq__intro { text-align: center; max-width: 600px; margin: 0 auto 52px; }
+    .faq__intro h2 { margin-bottom: 14px; }
+    .faq__list { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+    .faq__item {
+      background: var(--white);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .faq__q {
+      padding: 22px 28px;
+      font-weight: 600;
+      font-size: 1rem;
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      list-style: none;
+      user-select: none;
+    }
+    .faq__q::after { content: '+'; font-size: 1.4rem; color: var(--primary); flex-shrink: 0; transition: transform .2s; }
+    details[open] > .faq__q::after { content: '−'; }
+    .faq__a {
+      padding: 0 28px 22px;
+      font-size: .95rem;
+      color: var(--text-muted);
+      line-height: 1.72;
+    }
+
+    /* ── FINAL CTA ── */
+    /*
+      ELEMENTOR LAYOUT:
+      Section → background gradient: linear-gradient(135deg, #1340CC 0%, #1B4FFF 50%, #0EA5E9 100%)
+      Container → 1 column, text-align center, max-width 720px
+      H2 (white) → paragraph (light blue) → button row (centered)
+      Add shape divider (wave) at top
+      Decorative elements: floating icon badges or ring ornaments via background shapes
+    */
+    .final-cta {
+      background: linear-gradient(135deg, #1340CC 0%, #1B4FFF 60%, #0EA5E9 100%);
+      text-align: center;
+      padding: 100px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .final-cta::before {
+      content: '';
+      position: absolute;
+      width: 500px; height: 500px; border-radius: 50%;
+      background: rgba(255,255,255,.06);
+      top: -200px; right: -150px;
+    }
+    .final-cta::after {
+      content: '';
+      position: absolute;
+      width: 300px; height: 300px; border-radius: 50%;
+      background: rgba(255,255,255,.06);
+      bottom: -100px; left: -80px;
+    }
+    .final-cta__inner { position: relative; z-index: 1; max-width: 700px; margin: 0 auto; }
+    .final-cta h2 { color: var(--white); margin-bottom: 18px; font-size: clamp(2rem, 3.5vw, 2.8rem); }
+    .final-cta p  { color: rgba(255,255,255,.80); font-size: 1.1rem; max-width: 560px; margin: 0 auto 36px; }
+    .final-cta__btns { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+    .final-cta__guarantee {
+      margin-top: 32px;
+      font-size: .88rem;
+      color: rgba(255,255,255,.60);
+    }
+    .final-cta__guarantee span { color: rgba(255,255,255,.90); font-weight: 600; }
+
+    /* ── FOOTER ── */
+    .footer {
+      background: #07101A;
+      padding: 40px 24px;
+      text-align: center;
+    }
+    .footer p { color: #475569; font-size: .88rem; }
+    .footer a { color: #64748B; text-decoration: none; }
+    .footer a:hover { color: #94A3B8; }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 1024px) {
+      .hero__grid { grid-template-columns: 1fr; gap: 40px; }
+      .hero__visual { display: none; }
+      .problem__grid { grid-template-columns: repeat(2, 1fr); }
+      .services__grid { grid-template-columns: repeat(2, 1fr); }
+      .pricing__grid { grid-template-columns: 1fr; gap: 20px; }
+      .pricing__card--popular { transform: none; }
+      .why__grid { grid-template-columns: 1fr; gap: 48px; }
+    }
+    @media (max-width: 640px) {
+      .section { padding: 56px 0; }
+      .problem__grid { grid-template-columns: 1fr; }
+      .services__grid { grid-template-columns: 1fr; }
+      .hero__cta-row { flex-direction: column; align-items: flex-start; }
+      .why__right { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     NAVIGATION
+     Elementor: Header widget or Theme Builder header
+     Sticky header, white bg, 68px height
+     Logo left · CTA button right
+     ═══════════════════════════════════════════════════════════════ -->
+<nav class="nav">
+  <div class="nav__inner">
+    <a href="#" class="nav__logo">WebCare<span>Leader</span></a>
+    <a href="#checkup" class="btn btn--primary nav__cta">Get Free Website Checkup</a>
+  </div>
+</nav>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 1 — HERO
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="hero">
+  <div class="container">
+    <div class="hero__grid">
+
+      <!-- LEFT: Copy -->
+      <div class="hero__copy">
+        <p class="hero__eyebrow">✦ Professional Website Maintenance</p>
+
+        <!-- H1 -->
+        <h1>
+          Your Website Deserves<br />
+          More Than <span>"Set It<br />
+          and Forget It."</span>
+        </h1>
+
+        <p class="hero__sub">
+          WebCareLeader keeps your website fast, secure, and up-to-date — so you can
+          focus on running your business instead of worrying about your website.
+        </p>
+
+        <!-- CTA Buttons -->
+        <div class="hero__cta-row">
+          <a href="#checkup" class="btn btn--accent" id="checkup">
+            ✓ Get My Free Website Checkup
+          </a>
+          <a href="#plans" class="btn btn--outline">
+            View Care Plans →
+          </a>
+        </div>
+
+        <!-- Trust Bar -->
+        <!--
+          Elementor note: use Icon List widget, horizontal layout, gap 28px
+          Icons: checkmark or shield icon in accent green (#00C48C)
+        -->
+        <div class="hero__trust">
+          <div class="hero__trust-item">
+            <span class="icon">🛡️</span>
+            No long-term contracts
+          </div>
+          <div class="hero__trust-item">
+            <span class="icon">⚡</span>
+            Results in 48 hours
+          </div>
+          <div class="hero__trust-item">
+            <span class="icon">💬</span>
+            Real humans, real support
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Visual / Dashboard Mock -->
+      <!--
+        Elementor note: Replace this block with a professional browser-mockup image
+        showing a website performance dashboard or a "before/after speed score" visual.
+        Recommended size: 540×400px, PNG with transparent background.
+      -->
+      <div class="hero__visual">
+        <div class="hero__visual-bar">
+          <div class="hero__visual-dot"></div>
+          <div class="hero__visual-dot"></div>
+          <div class="hero__visual-dot"></div>
+        </div>
+        <div class="hero__visual-screen">
+          <div class="hero__stat-row">
+            <div class="hero__stat-card hero__stat-card--green">
+              <div class="number">99.9%</div>
+              <div class="label">Uptime</div>
+            </div>
+            <div class="hero__stat-card">
+              <div class="number">0</div>
+              <div class="label">Security Threats</div>
+            </div>
+            <div class="hero__stat-card">
+              <div class="number">1.4s</div>
+              <div class="label">Load Time</div>
+            </div>
+            <div class="hero__stat-card hero__stat-card--green">
+              <div class="number">✓</div>
+              <div class="label">All Backups Good</div>
+            </div>
+          </div>
+          <div class="hero__uptime-bar">
+            <span>🔒 SSL Certificate</span>
+            <span class="hero__uptime-val">Valid · 247 days</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 2 — PROBLEM
+     "Is Your Website Costing You Customers Right Now?"
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section problem">
+  <div class="container">
+
+    <div class="problem__intro">
+      <span class="badge">The Real Cost of Neglect</span>
+      <h2>Is Your Website Quietly Driving Customers Away?</h2>
+      <p>
+        Most small business owners don't realise there's a problem until it's too late —
+        a hacked site, a lost sale, or a Google penalty. These four issues affect
+        thousands of websites every day.
+      </p>
+    </div>
+
+    <!--
+      Elementor note: 4-column grid, each card uses Icon Box widget.
+      Icon style: outlined, 40px, colour #EF4444 (red) or #F97316 (orange)
+      Card hover: box-shadow + slight translate-Y
+    -->
+    <div class="problem__grid">
+
+      <div class="problem__card">
+        <!-- Icon suggestion: shield-exclamation or bug -->
+        <span class="problem__icon">🔓</span>
+        <h3>Security Vulnerabilities</h3>
+        <p>
+          Outdated plugins and themes are the #1 entry point for hackers.
+          A single breach can expose your customers' data and destroy your reputation overnight.
+        </p>
+      </div>
+
+      <div class="problem__card">
+        <!-- Icon suggestion: clock or tortoise -->
+        <span class="problem__icon">🐢</span>
+        <h3>Slow Page Speed</h3>
+        <p>
+          53% of mobile visitors leave a page that takes more than 3 seconds to load.
+          If your site is slow, you're handing sales directly to your competitors.
+        </p>
+      </div>
+
+      <div class="problem__card">
+        <!-- Icon suggestion: broken-link or chain-broken -->
+        <span class="problem__icon">🔗</span>
+        <h3>Broken Links & Errors</h3>
+        <p>
+          Dead links and 404 errors don't just frustrate visitors — they signal to
+          Google that your site isn't well-maintained, quietly hurting your rankings.
+        </p>
+      </div>
+
+      <div class="problem__card">
+        <!-- Icon suggestion: calendar-x or timer -->
+        <span class="problem__icon">📉</span>
+        <h3>Outdated Content & Software</h3>
+        <p>
+          WordPress, plugins, and themes release updates constantly. Falling behind
+          means compatibility errors, broken forms, and a website that looks years old.
+        </p>
+      </div>
+
+    </div>
+
+    <!--
+      Elementor note: Full-width inner container, light-red background (#FFF5F5),
+      red border, 32px padding, centered text. Use Text widget.
+    -->
+    <div class="problem__bottom">
+      <p>
+        🚨 The average small business loses <strong>$2,000–$10,000+</strong> per year
+        from a poorly maintained website — through lost traffic, lost conversions, and emergency repair costs.
+      </p>
+    </div>
+
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 3 — SERVICES INCLUDED
+     "Everything Your Website Needs — Done for You"
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section section--light services">
+  <div class="container">
+
+    <div class="services__intro">
+      <span class="badge">What's Included</span>
+      <h2>Everything Your Website Needs, Done for You Every Month</h2>
+      <p>
+        No tech skills required. No guesswork. We handle every layer of your website
+        so you can get back to doing what you do best.
+      </p>
+    </div>
+
+    <!--
+      Elementor note: 3-column grid. Each item is a flex row widget:
+      Left: Icon in a 50×50px rounded container (primary-blue 10% opacity background)
+      Right: H3 + short paragraph
+      Card: white background, border-radius 12px, box-shadow
+    -->
+    <div class="services__grid">
+
+      <div class="services__item">
+        <!-- Icon suggestion: shield-check (security) -->
+        <div class="services__item-icon">🛡️</div>
+        <div>
+          <h3>Security Monitoring</h3>
+          <p>24/7 malware scanning, firewall protection, and immediate alerts if anything looks suspicious.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: refresh / arrows-rotate -->
+        <div class="services__item-icon">🔄</div>
+        <div>
+          <h3>Plugin & Theme Updates</h3>
+          <p>We apply every WordPress core, plugin, and theme update — tested before deployment so nothing breaks.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: database or cloud-upload -->
+        <div class="services__item-icon">☁️</div>
+        <div>
+          <h3>Daily Off-Site Backups</h3>
+          <p>Your entire site backed up daily to secure off-site cloud storage. One-click restore anytime.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: gauge / speedometer -->
+        <div class="services__item-icon">⚡</div>
+        <div>
+          <h3>Speed Optimisation</h3>
+          <p>Image compression, caching, and performance tuning to keep your pages loading in under 2 seconds.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: chart-line or activity -->
+        <div class="services__item-icon">📊</div>
+        <div>
+          <h3>Uptime Monitoring</h3>
+          <p>We watch your site around the clock. If it goes down, we know before you do — and we fix it fast.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: lock / key -->
+        <div class="services__item-icon">🔒</div>
+        <div>
+          <h3>SSL Certificate Management</h3>
+          <p>Keep the padlock in the browser bar and maintain Google's trust signal — auto-renewed, always active.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: link or search-magnifier -->
+        <div class="services__item-icon">🔍</div>
+        <div>
+          <h3>Broken Link Scanning</h3>
+          <p>Monthly sweeps to find and fix dead links before visitors — or Google — notice them.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: file-text or pencil -->
+        <div class="services__item-icon">✏️</div>
+        <div>
+          <h3>Content Updates</h3>
+          <p>Need to update hours, pricing, or a paragraph of text? Submit a request and we'll handle it for you.</p>
+        </div>
+      </div>
+
+      <div class="services__item">
+        <!-- Icon suggestion: headset or message-circle -->
+        <div class="services__item-icon">💬</div>
+        <div>
+          <h3>Monthly Report & Support</h3>
+          <p>A clear monthly report showing exactly what was done — plus real human support when you need it.</p>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 4 — MONTHLY CARE PLANS (PRICING)
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section pricing" id="plans">
+  <div class="container">
+
+    <div class="pricing__intro">
+      <span class="badge">Monthly Care Plans</span>
+      <h2>Simple, Transparent Pricing</h2>
+      <p>
+        No surprise invoices. No hidden fees. Choose the plan that fits your business
+        and get started today — you can upgrade or cancel anytime.
+      </p>
+    </div>
+
+    <!--
+      Elementor note:
+      Outer container: 3 columns.
+      Middle column card has CSS transform scale(1.04) and primary-blue border.
+      Add a "Most Popular" position: absolute badge above the card.
+      Use Elementor Price List or a custom inner container for each card.
+    -->
+    <div class="pricing__grid">
+
+      <!-- PLAN 1: Essentials -->
+      <div class="pricing__card">
+        <p class="pricing__plan-name">Essentials</p>
+        <div class="pricing__price">
+          <span class="pricing__amount">$79</span>
+        </div>
+        <span class="pricing__period">/ month · cancel anytime</span>
+        <p class="pricing__tagline">
+          The safety net every small website needs — core protection without the fuss.
+        </p>
+        <ul class="pricing__features">
+          <li>Weekly plugin & theme updates</li>
+          <li>Daily cloud backups (7-day history)</li>
+          <li>Uptime monitoring</li>
+          <li>SSL certificate management</li>
+          <li>Monthly health report</li>
+          <li class="not-included">Speed optimisation</li>
+          <li class="not-included">Content updates</li>
+          <li class="not-included">Priority support</li>
+        </ul>
+        <a href="#checkup" class="btn btn--outline pricing__btn">Get Started</a>
+      </div>
+
+      <!-- PLAN 2: Professional (POPULAR) -->
+      <div class="pricing__card pricing__card--popular">
+        <span class="pricing__badge-popular">⭐ Most Popular</span>
+        <p class="pricing__plan-name">Professional</p>
+        <div class="pricing__price">
+          <span class="pricing__amount">$149</span>
+        </div>
+        <span class="pricing__period">/ month · cancel anytime</span>
+        <p class="pricing__tagline">
+          Full-service care for growing businesses that need more than the basics.
+        </p>
+        <ul class="pricing__features">
+          <li>Everything in Essentials</li>
+          <li>Advanced security firewall & scanning</li>
+          <li>Daily backups (30-day history)</li>
+          <li>Speed optimisation (monthly)</li>
+          <li>Up to 1 hour of content updates</li>
+          <li>Broken link scanning & fixing</li>
+          <li>Priority email support (24h response)</li>
+          <li class="not-included">Emergency same-day response</li>
+        </ul>
+        <a href="#checkup" class="btn btn--primary pricing__btn">Get Started</a>
+      </div>
+
+      <!-- PLAN 3: Business -->
+      <div class="pricing__card">
+        <p class="pricing__plan-name">Business</p>
+        <div class="pricing__price">
+          <span class="pricing__amount">$249</span>
+        </div>
+        <span class="pricing__period">/ month · cancel anytime</span>
+        <p class="pricing__tagline">
+          Complete peace of mind for established businesses where downtime is not an option.
+        </p>
+        <ul class="pricing__features">
+          <li>Everything in Professional</li>
+          <li>Up to 3 hours of content updates</li>
+          <li>Emergency same-day response</li>
+          <li>Quarterly strategy call (30 min)</li>
+          <li>Google Analytics reporting</li>
+          <li>WooCommerce / eCommerce support</li>
+          <li>Staging environment for safe testing</li>
+          <li>Dedicated account manager</li>
+        </ul>
+        <a href="#checkup" class="btn btn--outline pricing__btn">Get Started</a>
+      </div>
+
+    </div>
+
+    <!--
+      Elementor note: Text widget, centered, 16px margin-top, colour #64748B
+    -->
+    <p class="pricing__note">
+      🔒 All plans are month-to-month. No setup fees. No long-term contracts.
+      Not sure which plan is right for you? <a href="#checkup" style="color:#93C5FD; text-decoration:underline;">Get a free website checkup</a> and we'll recommend the best fit.
+    </p>
+
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 5 — WHY WEBCAREPLEADER
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section why">
+  <div class="container">
+    <div class="why__grid">
+
+      <!-- LEFT: Differentiators -->
+      <div class="why__left">
+        <div class="why__badge">
+          <span class="badge">Why WebCareLeader</span>
+        </div>
+        <h2>We're Not an Agency.<br />We're Your Website's Caretaker.</h2>
+        <p>
+          Big agencies charge big retainers and pass your work to junior staff.
+          Freelancers disappear. WebCareLeader gives you a dedicated team that
+          knows your site, responds fast, and actually cares about your results.
+        </p>
+
+        <!--
+          Elementor note: Icon List widget, vertical layout.
+          Each item: custom icon (48×48 container, rounded, primary blue 10% bg) + text.
+        -->
+        <div class="why__items">
+
+          <div class="why__item">
+            <!-- Icon suggestion: user-check / person-verified -->
+            <div class="why__item-icon">👤</div>
+            <div>
+              <h3>Real Humans, Not Bots</h3>
+              <p>Every task is reviewed and completed by our in-house team — not automated scripts running unattended.</p>
+            </div>
+          </div>
+
+          <div class="why__item">
+            <!-- Icon suggestion: clock-check / hourglass -->
+            <div class="why__item-icon">⏱️</div>
+            <div>
+              <h3>Fast Turnaround, Always</h3>
+              <p>Most maintenance tasks are completed within 24 hours. Urgent issues get same-day attention on Business plans.</p>
+            </div>
+          </div>
+
+          <div class="why__item">
+            <!-- Icon suggestion: file-analytics / bar-chart -->
+            <div class="why__item-icon">📋</div>
+            <div>
+              <h3>Full Transparency</h3>
+              <p>You receive a clear monthly report detailing every action taken — no black boxes, no mystery invoices.</p>
+            </div>
+          </div>
+
+          <div class="why__item">
+            <!-- Icon suggestion: heart / thumbs-up -->
+            <div class="why__item-icon">❤️</div>
+            <div>
+              <h3>We Speak Plain English</h3>
+              <p>No jargon, no tech-speak. We explain everything in language you can share with your team or board.</p>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- RIGHT: Stats + Testimonial -->
+      <!--
+        Elementor note: 2×2 grid of stat cards + full-width testimonial card below.
+        Stat cards: light-bg (#F5F7FA), large number in primary blue, label below.
+        Testimonial card: primary-blue background, italic blockquote, cite below.
+      -->
+      <div class="why__right">
+
+        <div class="why__stat-card">
+          <span class="number">98%</span>
+          <span class="label">Client satisfaction rate</span>
+        </div>
+        <div class="why__stat-card">
+          <span class="number">&lt;24h</span>
+          <span class="label">Average response time</span>
+        </div>
+        <div class="why__stat-card">
+          <span class="number">500+</span>
+          <span class="label">Websites maintained</span>
+        </div>
+        <div class="why__stat-card">
+          <span class="number">0</span>
+          <span class="label">Data breaches on our watch</span>
+        </div>
+
+        <div class="why__testimonial">
+          <blockquote>
+            "Before WebCareLeader, I had no idea my website was running on plugins
+            that hadn't been updated in two years. Within the first week, they patched
+            six security vulnerabilities and my Google speed score went from 42 to 89.
+            Total game changer."
+          </blockquote>
+          <cite>— Sarah M., Owner · Bright Horizons Therapy Center</cite>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 6 — FAQ
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section section--light faq">
+  <div class="container">
+
+    <div class="faq__intro">
+      <span class="badge">FAQ</span>
+      <h2>Questions? We've Got Answers.</h2>
+      <p>
+        Everything you need to know before getting started — no hidden surprises.
+      </p>
+    </div>
+
+    <!--
+      Elementor note: Use the built-in Accordion or Toggle widget.
+      Style: white background, border 1px #E2E8F0, border-radius 10px.
+      Active item: title colour → primary blue. No drop shadows needed.
+      Max-width 760px, centered.
+    -->
+    <div class="faq__list">
+
+      <details class="faq__item">
+        <summary class="faq__q">Do I need to be on WordPress to use WebCareLeader?</summary>
+        <p class="faq__a">
+          Most of our clients are on WordPress, which is our core specialty. We also support
+          Webflow, Squarespace, and custom HTML/CSS sites on our Business plan.
+          Not sure if we support your platform? <a href="#checkup" style="color:var(--primary);">Request a free checkup</a> and we'll let you know within 24 hours.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">What exactly is a "free website checkup"?</summary>
+        <p class="faq__a">
+          It's a no-obligation audit of your website covering: security vulnerabilities, plugin/theme update status,
+          page speed score, uptime history, SSL certificate, and broken links. We send you a plain-English report
+          with findings and recommendations — whether or not you become a client.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">How long does it take to get started?</summary>
+        <p class="faq__a">
+          Once you sign up, we complete onboarding within 48 hours. We'll ask for limited admin access
+          to your website (we explain exactly what we need and why), run an initial audit, and apply
+          any urgent fixes. From that point, your site is actively maintained on a rolling basis.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">Is my website safe if I give you admin access?</summary>
+        <p class="faq__a">
+          Absolutely. We follow strict security protocols — your credentials are stored in an enterprise-grade
+          password vault, never in email or spreadsheets. Our team operates on a need-to-know basis, and you
+          can revoke access at any time. We carry professional liability insurance for added peace of mind.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">Can I cancel my plan at any time?</summary>
+        <p class="faq__a">
+          Yes. All plans are month-to-month with no long-term commitment. You can cancel before your
+          next billing date and you won't be charged again. We'll even provide a full handover document
+          so your site stays in great shape after you leave.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">What happens if my site gets hacked while I'm on a plan?</summary>
+        <p class="faq__a">
+          We handle it at no extra charge. On all plans, if your site is compromised while under
+          our care, we will clean the malware, restore from backup, patch the vulnerability, and
+          harden the security — covered within your monthly plan. We've never had a client on
+          an active plan experience an unresolved breach.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">I already have a web developer. Do I still need this?</summary>
+        <p class="faq__a">
+          Most web developers build sites — they're not set up for ongoing, day-to-day maintenance.
+          WebCareLeader complements your developer perfectly: we handle the routine work (updates,
+          backups, monitoring, reports) so your developer can focus on new features and growth projects.
+          Many of our clients were referred to us directly by their developers.
+        </p>
+      </details>
+
+      <details class="faq__item">
+        <summary class="faq__q">Do you offer custom or enterprise plans?</summary>
+        <p class="faq__a">
+          Yes. If you run multiple websites, a high-traffic eCommerce store, or need custom SLA terms,
+          get in touch and we'll build a plan that fits. Start with a free checkup and we'll discuss
+          your specific requirements.
+        </p>
+      </details>
+
+    </div>
+
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 7 — FINAL CTA
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="final-cta" id="free-checkup">
+  <div class="final-cta__inner">
+
+    <!--
+      Elementor note:
+      Section background: gradient linear-gradient(135deg, #1340CC 0%, #1B4FFF 60%, #0EA5E9 100%)
+      Add a top wave shape divider (white fill) to transition from previous section.
+      Container: 1 column, max-width 720px, centered.
+      Add decorative animated ring ornaments via background shapes or custom CSS.
+    -->
+
+    <span class="badge" style="background:rgba(255,255,255,.15); color:#E0F2FE;">
+      🎁 Free, No Obligation
+    </span>
+
+    <h2>
+      Find Out Exactly What's Wrong<br />With Your Website — For Free
+    </h2>
+
+    <p>
+      In just 48 hours, you'll have a clear picture of your site's health:
+      security gaps, speed issues, outdated software, and quick wins you can act on
+      today — even if you never become a client.
+    </p>
+
+    <!--
+      Elementor note: Button widget group, centered, horizontal row.
+      Primary button: white background, primary-blue text (inverted for contrast).
+      Secondary button: transparent, white border.
+    -->
+    <div class="final-cta__btns">
+      <a href="#" class="btn" style="background:var(--white); color:var(--primary); box-shadow:0 4px 24px rgba(0,0,0,.25);">
+        ✓ Yes — Check My Website for Free
+      </a>
+      <a href="#plans" class="btn btn--outline">
+        View Plans First
+      </a>
+    </div>
+
+    <!--
+      Elementor note: Text widget below buttons, smaller font, low opacity white.
+    -->
+    <p class="final-cta__guarantee">
+      <span>No credit card required.</span> &nbsp;·&nbsp;
+      <span>No sales pressure.</span> &nbsp;·&nbsp;
+      Results delivered in 48 hours.
+    </p>
+
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     FOOTER
+     ═══════════════════════════════════════════════════════════════ -->
+<footer class="footer">
+  <p>
+    © 2025 WebCareLeader · All Rights Reserved &nbsp;·&nbsp;
+    <a href="#">Privacy Policy</a> &nbsp;·&nbsp;
+    <a href="#">Terms of Service</a> &nbsp;·&nbsp;
+    <a href="#">Contact Us</a>
+  </p>
+</footer>
+
+</body>
+</html>
